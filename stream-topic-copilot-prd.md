@@ -275,6 +275,7 @@ The request should include at minimum:
 - explicit instructions to separate planned-topic evidence from off-topic speech.
 
 The response shall be strict structured output.
+The exact V1 response schema is defined in [docs/scoping/codex-analysis-response-schema.md](docs/scoping/codex-analysis-response-schema.md).
 
 ### 10.8 Suggestion categories
 The live UI shall support the following categories:
@@ -594,3 +595,7 @@ Secondary success criteria:
 - Prefer conservative completion logic over clever but opaque automation.
 - Prefer understandable microphone UX over optimized engineering purity.
 - Keep the original markdown safe.
+
+## 20. Companion Specs
+
+- [Codex Analysis Response Schema](docs/scoping/codex-analysis-response-schema.md) defines the exact V1 structured JSON contract returned by Codex.
