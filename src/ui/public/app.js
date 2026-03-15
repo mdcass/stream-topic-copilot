@@ -25,11 +25,11 @@ async function requestJson(url, options = {}) {
 function showError(message) {
   const banner = byId("error-banner");
   banner.textContent = message;
-  banner.classList.remove("hidden");
+  banner.classList.remove("d-none");
 }
 
 function clearError() {
-  byId("error-banner").classList.add("hidden");
+  byId("error-banner").classList.add("d-none");
 }
 
 function collectConfigFormValues() {
@@ -50,11 +50,25 @@ function markConfigDirty() {
 
 function setTab(tabId) {
   document.querySelectorAll(".tab").forEach((tab) => {
-    tab.classList.toggle("is-active", tab.dataset.tab === tabId);
+    tab.classList.toggle("active", tab.dataset.tab === tabId);
   });
   document.querySelectorAll(".tab-panel").forEach((panel) => {
-    panel.classList.toggle("is-active", panel.id === `tab-${tabId}`);
+    panel.classList.toggle("d-none", panel.id !== `tab-${tabId}`);
   });
+  byId("live-tab-status").classList.toggle("d-none", tabId !== "live");
+}
+
+function setEmptyState(container, message) {
+  container.innerHTML = "";
+  container.textContent = message;
+  container.classList.add("text-body-secondary");
+}
+
+function createPanelRow(contentHtml) {
+  const div = document.createElement("div");
+  div.className = "border rounded p-2 bg-body-tertiary";
+  div.innerHTML = contentHtml;
+  return div;
 }
 
 function renderSuggestions(containerId, items, titleField = "text") {
@@ -62,20 +76,17 @@ function renderSuggestions(containerId, items, titleField = "text") {
   container.innerHTML = "";
 
   if (!items || items.length === 0) {
-    container.textContent = "No suggestions yet.";
-    container.classList.add("muted");
+    setEmptyState(container, "No suggestions yet.");
     return;
   }
 
-  container.classList.remove("muted");
+  container.classList.remove("text-body-secondary");
   items.forEach((item) => {
-    const div = document.createElement("div");
-    div.className = "suggestion";
-    div.innerHTML = `
-      <strong>${item[titleField]}</strong>
-      <p>${item.rationale}</p>
-      <p class="muted">Confidence: ${(item.confidence * 100).toFixed(0)}%</p>
-    `;
+    const div = createPanelRow(`
+      <div class="fw-semibold">${item[titleField]}</div>
+      <div>${item.rationale}</div>
+      <div class="text-body-secondary">Confidence: ${(item.confidence * 100).toFixed(0)}%</div>
+    `);
     container.appendChild(div);
   });
 }
@@ -96,15 +107,13 @@ function renderMicrophoneDiagnostics(monitor) {
   ].filter(Boolean);
 
   if (!lines.length) {
-    container.textContent = "No microphone diagnostics yet.";
-    container.classList.add("muted");
+    setEmptyState(container, "No microphone diagnostics yet.");
     return;
   }
 
-  container.classList.remove("muted");
+  container.classList.remove("text-body-secondary");
   lines.forEach((line) => {
-    const row = document.createElement("div");
-    row.className = "suggestion";
+    const row = createPanelRow("");
     row.textContent = line;
     container.appendChild(row);
   });
@@ -114,16 +123,16 @@ function renderTranscriptTail(events) {
   const container = byId("transcript-tail");
   container.innerHTML = "";
   if (!events || events.length === 0) {
-    container.textContent = "No transcript captured yet.";
-    container.classList.add("muted");
+    setEmptyState(container, "No transcript captured yet.");
     return;
   }
 
-  container.classList.remove("muted");
+  container.classList.remove("text-body-secondary");
   events.slice().reverse().forEach((event) => {
-    const div = document.createElement("div");
-    div.className = "suggestion";
-    div.innerHTML = `<strong>${new Date(event.timestamp).toLocaleTimeString()}</strong><p>${event.text}</p>`;
+    const div = createPanelRow(`
+      <div class="fw-semibold">${new Date(event.timestamp).toLocaleTimeString()}</div>
+      <div>${event.text}</div>
+    `);
     container.appendChild(div);
   });
 }
@@ -137,7 +146,7 @@ function renderSubtitleChunks(session) {
     return;
   }
 
-  container.classList.remove("muted");
+  container.classList.remove("text-body-secondary");
   const sessionStart = new Date(session.startedAt).getTime();
   const fmt = (isoTime) => {
     const relative = Math.max(0, new Date(isoTime).getTime() - sessionStart);
@@ -150,13 +159,11 @@ function renderSubtitleChunks(session) {
 
   session.chunks.slice(-8).reverse().forEach((chunk, reverseIndex) => {
     const ordinal = session.chunks.length - reverseIndex;
-    const div = document.createElement("div");
-    div.className = "suggestion";
-    div.innerHTML = `
-      <strong>${ordinal}</strong>
-      <p class="muted">${fmt(chunk.startedAt)} --> ${fmt(chunk.endedAt)}</p>
-      <p>${chunk.text}</p>
-    `;
+    const div = createPanelRow(`
+      <div class="fw-semibold">${ordinal}</div>
+      <div class="text-body-secondary">${fmt(chunk.startedAt)} --> ${fmt(chunk.endedAt)}</div>
+      <div>${chunk.text}</div>
+    `);
     container.appendChild(div);
   });
 }
@@ -165,27 +172,26 @@ function renderTopicState(session) {
   const container = byId("topic-state-list");
   container.innerHTML = "";
   if (!session) {
-    container.textContent = "No active session.";
-    container.classList.add("muted");
+    setEmptyState(container, "No active session.");
     return;
   }
 
-  container.classList.remove("muted");
+  container.classList.remove("text-body-secondary");
   Object.values(session.topics)
     .sort((a, b) => a.originalOrder - b.originalOrder)
     .forEach((topic) => {
-      const row = document.createElement("div");
-      row.className = "topic-row";
-      row.innerHTML = `
-        <strong>${topic.text}</strong>
-        <p class="muted">${topic.currentState} · ${topic.section}</p>
-      `;
+      const row = createPanelRow(`
+        <div class="fw-semibold">${topic.text}</div>
+        <div class="text-body-secondary">${topic.currentState} · ${topic.section}</div>
+      `);
 
       const actions = document.createElement("div");
-      actions.className = "topic-actions";
+      actions.className = "d-flex flex-wrap gap-2 mt-2";
       ["partial", "covered", "snoozed", "dismissed"].forEach((nextState) => {
         const button = document.createElement("button");
         button.textContent = nextState;
+        button.className = "btn btn-sm btn-outline-secondary";
+        button.type = "button";
         button.addEventListener("click", async () => {
           try {
             await requestJson("/api/session/topic-state", {
@@ -208,25 +214,23 @@ function renderHistory(entries, targetId, resumable = false) {
   const container = byId(targetId);
   container.innerHTML = "";
   if (!entries || entries.length === 0) {
-    container.textContent = resumable ? "No resumable sessions." : "No sessions yet.";
-    container.classList.add("muted");
+    setEmptyState(container, resumable ? "No resumable sessions." : "No sessions yet.");
     return;
   }
 
-  container.classList.remove("muted");
+  container.classList.remove("text-body-secondary");
   entries.forEach((entry) => {
-    const row = document.createElement("div");
-    row.className = resumable ? "resume-row" : "history-row";
-    row.innerHTML = `
-      <strong>${entry.id}</strong>
-      <p>${entry.status} · ${(entry.durationSeconds / 60).toFixed(1)} min</p>
-      <p class="muted">covered ${entry.countsByState.covered} · partial ${entry.countsByState.partial} · pending ${entry.countsByState.pending}</p>
-      <a class="artifact-link" href="${entry.proposedMarkdownPath.replace(/^.*\/sessions\//, "/artifacts/")}" target="_blank" rel="noreferrer">Proposed markdown</a>
-    `;
+    const row = createPanelRow(`
+      <div class="fw-semibold">${entry.id}</div>
+      <div>${entry.status} · ${(entry.durationSeconds / 60).toFixed(1)} min</div>
+      <div class="text-body-secondary">covered ${entry.countsByState.covered} · partial ${entry.countsByState.partial} · pending ${entry.countsByState.pending}</div>
+      <a class="small" href="${entry.proposedMarkdownPath.replace(/^.*\/sessions\//, "/artifacts/")}" target="_blank" rel="noreferrer">Proposed markdown</a>
+    `);
     if (resumable) {
       const button = document.createElement("button");
       button.textContent = "Resume";
-      button.className = "accent";
+      button.className = "btn btn-sm btn-outline-primary mt-2";
+      button.type = "button";
       button.addEventListener("click", async () => {
         try {
           await requestJson(`/api/session/resume/${entry.id}`, { method: "POST" });
@@ -279,6 +283,7 @@ function renderConfig(data) {
   byId("analysis-threshold-label").textContent = `${Math.round(effectiveConfig.analysisAutoApplyThreshold * 100)}%`;
   byId("permission-pill").textContent = `Mic: ${microphonePermission}`;
   byId("mic-level-bar").style.width = `${Math.round((microphoneMonitor?.level ?? 0) * 100)}%`;
+  byId("mic-level-bar").setAttribute("aria-valuenow", String(Math.round((microphoneMonitor?.level ?? 0) * 100)));
   byId("mic-level-meta").textContent = microphoneMonitor?.probeStatus === "running"
     ? `Probe active${microphoneMonitor.probeLastUpdatedAt ? ` · updated ${new Date(microphoneMonitor.probeLastUpdatedAt).toLocaleTimeString()}` : ""}`
     : (microphoneMonitor?.probeError || "No probe data yet.");
@@ -288,10 +293,29 @@ function renderConfig(data) {
 function renderLive(data) {
   const session = data.activeSession;
   const monitor = data.microphoneMonitor;
-  byId("session-pill").textContent = session ? `Active: ${session.id}` : "No active session";
-  byId("mic-level-bar").style.width = `${Math.round((monitor?.level ?? session?.microphoneLevel ?? 0) * 100)}%`;
+  const analyzeButton = byId("analyze-now");
+  const endButton = byId("end-session");
+  const undoButton = byId("undo-action");
+  const mockTranscriptButton = byId("send-mock-transcript");
+  const permissionPill = byId("permission-pill");
+  const sessionPill = byId("session-pill");
+  permissionPill.textContent = `Mic: ${data.microphonePermission}`;
+  permissionPill.className = `badge ${data.microphonePermission === "granted" ? "text-bg-success" : "text-bg-secondary"}`;
+  sessionPill.textContent = session ? `Active: ${session.id}` : "No active session";
+  sessionPill.className = `badge ${session ? "text-bg-primary" : "text-bg-secondary"}`;
 
   if (!session) {
+    analyzeButton.classList.add("disabled");
+    analyzeButton.setAttribute("aria-disabled", "true");
+    analyzeButton.disabled = true;
+    endButton.classList.add("disabled");
+    endButton.setAttribute("aria-disabled", "true");
+    endButton.disabled = true;
+    endButton.textContent = "No active session";
+    undoButton.classList.add("disabled");
+    undoButton.setAttribute("aria-disabled", "true");
+    undoButton.disabled = true;
+    mockTranscriptButton.disabled = true;
     byId("session-meta").textContent = "No active session.";
     renderSuggestions("active-topics", []);
     renderSuggestions("elaboration-starters", []);
@@ -303,6 +327,17 @@ function renderLive(data) {
     return;
   }
 
+  analyzeButton.classList.remove("disabled");
+  analyzeButton.removeAttribute("aria-disabled");
+  analyzeButton.disabled = false;
+  endButton.classList.remove("disabled");
+  endButton.removeAttribute("aria-disabled");
+  endButton.disabled = false;
+  endButton.textContent = "End session";
+  undoButton.classList.remove("disabled");
+  undoButton.removeAttribute("aria-disabled");
+  undoButton.disabled = false;
+  mockTranscriptButton.disabled = false;
   byId("session-meta").textContent = [
     `Started ${new Date(session.startedAt).toLocaleString()}`,
     `Status ${session.status}`,
@@ -445,7 +480,7 @@ function bindEvents() {
   });
 }
 
-bindEvents();
+  bindEvents();
 loadState().catch((error) => showError(error.message));
 state.pollingHandle = setInterval(() => {
   loadState().catch((error) => showError(error.message));

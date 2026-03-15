@@ -4,150 +4,136 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Stream Topic Copilot</title>
-    <link rel="stylesheet" href="/styles.css" />
+    <link rel="stylesheet" href="/vendor/bootstrap/css/bootstrap.min.css" />
   </head>
-  <body>
-    <main class="shell">
-      <header class="topbar">
-        <div>
-          <p class="eyebrow">Local Control Surface</p>
-          <h1>Stream Topic Copilot</h1>
-        </div>
-        <div class="status-group">
-          <span id="permission-pill" class="pill">Mic: unknown</span>
-          <span id="session-pill" class="pill">No active session</span>
-        </div>
-      </header>
-
-      <nav class="tabs">
-        <button class="tab is-active" data-tab="config">Config</button>
-        <button class="tab" data-tab="live">Live</button>
-        <button class="tab" data-tab="history">History</button>
-      </nav>
-
-      <section id="error-banner" class="error-banner hidden"></section>
-
-      <section id="tab-config" class="tab-panel is-active">
-        <div class="card">
-          <h2>Setup</h2>
-          <label class="field">
-            <span>Markdown topics file</span>
-            <input id="markdown-path" type="text" />
-          </label>
-          <label class="field">
-            <span>Microphone</span>
-            <select id="microphone-id"></select>
-          </label>
-          <div class="field">
-            <span>Microphone activity</span>
-            <div class="meter"><span id="mic-level-bar"></span></div>
-            <p id="mic-level-meta" class="muted">No probe data yet.</p>
-          </div>
-          <label class="field">
-            <span>STT provider</span>
-            <select id="stt-provider"></select>
-          </label>
-          <label class="field">
-            <span>Analysis provider</span>
-            <select id="analysis-provider"></select>
-          </label>
-          <label class="field">
-            <span>Chunk sensitivity</span>
-            <select id="chunk-sensitivity">
-              <option value="low">Low</option>
-              <option value="medium">Medium</option>
-              <option value="high">High</option>
-            </select>
-          </label>
-          <label class="field">
-            <span>Auto-apply threshold</span>
-            <input id="analysis-threshold" type="range" min="0" max="1" step="0.05" />
-            <strong id="analysis-threshold-label"></strong>
-          </label>
-          <div class="actions">
-            <button id="save-config">Save config</button>
-            <button id="refresh-state" class="secondary">Refresh devices</button>
-            <button id="start-session" class="accent">Start session</button>
-          </div>
-        </div>
-
-        <div class="card">
-          <h2>Microphone Diagnostics</h2>
-          <div id="microphone-diagnostics" class="stack muted">No microphone diagnostics yet.</div>
-        </div>
-
-        <div class="card">
-          <h2>Resume</h2>
-          <div id="resume-list" class="stack muted">No resumable sessions.</div>
-        </div>
-      </section>
-
-      <section id="tab-live" class="tab-panel">
-        <div class="column">
-          <div class="card">
-            <h2>Controls</h2>
-            <div class="actions">
-              <button id="analyze-now">Analyze now</button>
-              <button id="end-session" class="danger">End session</button>
-              <button id="undo-action" class="secondary">Undo</button>
+  <body class="bg-body-tertiary">
+    <main class="container py-3">
+      <div class="row justify-content-center">
+        <div class="col-12 col-xl-5">
+          <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-3">
+            <nav class="nav nav-pills gap-2">
+              <button class="tab nav-link active py-1 px-2 small" data-tab="config" type="button">Config</button>
+              <button class="tab nav-link py-1 px-2 small" data-tab="live" type="button">Live</button>
+              <button class="tab nav-link py-1 px-2 small" data-tab="history" type="button">History</button>
+            </nav>
+            <div id="live-tab-status" class="d-none flex-wrap gap-2">
+              <span id="permission-pill" class="badge text-bg-secondary">Mic: unknown</span>
+              <span id="session-pill" class="badge text-bg-secondary">No active session</span>
             </div>
-            <p id="session-meta" class="muted">No active session.</p>
           </div>
 
-          <div class="card">
-            <h2>Active Topics</h2>
-            <div id="active-topics" class="stack muted">No suggestions yet.</div>
-          </div>
+          <section id="error-banner" class="alert alert-danger small py-2 px-3 d-none mb-3" role="alert"></section>
 
-          <div class="card">
-            <h2>Elaboration Starters</h2>
-            <div id="elaboration-starters" class="stack muted">No suggestions yet.</div>
-          </div>
+          <section id="tab-config" class="tab-panel">
+            <div class="vstack gap-3">
+              <div class="card">
+                <div class="card-body">
+                  <h2 class="h6 card-title">Setup</h2>
+                  <div class="mb-3">
+                    <label class="form-label small" for="markdown-path">Markdown topics file</label>
+                    <input id="markdown-path" class="form-control form-control-sm" type="text" />
+                  </div>
+                  <div class="mb-3">
+                    <label class="form-label small" for="microphone-id">Microphone</label>
+                    <select id="microphone-id" class="form-select form-select-sm"></select>
+                  </div>
+                  <div class="mb-3">
+                    <label class="form-label small" for="mic-level-bar">Microphone activity</label>
+                    <div class="progress" role="progressbar" aria-label="Microphone activity">
+                      <div id="mic-level-bar" class="progress-bar" style="width: 0%"></div>
+                    </div>
+                    <div id="mic-level-meta" class="form-text small">No probe data yet.</div>
+                  </div>
+                  <div class="mb-3">
+                    <label class="form-label small" for="stt-provider">STT provider</label>
+                    <select id="stt-provider" class="form-select form-select-sm"></select>
+                  </div>
+                  <div class="mb-3">
+                    <label class="form-label small" for="analysis-provider">Analysis provider</label>
+                    <select id="analysis-provider" class="form-select form-select-sm"></select>
+                  </div>
+                  <div class="mb-3">
+                    <label class="form-label small" for="chunk-sensitivity">Chunk sensitivity</label>
+                    <select id="chunk-sensitivity" class="form-select form-select-sm">
+                      <option value="low">Low</option>
+                      <option value="medium">Medium</option>
+                      <option value="high">High</option>
+                    </select>
+                  </div>
+                  <div class="mb-3">
+                    <label class="form-label small" for="analysis-threshold">Auto-apply threshold</label>
+                    <input id="analysis-threshold" class="form-range" type="range" min="0" max="1" step="0.05" />
+                    <div id="analysis-threshold-label" class="form-text small"></div>
+                  </div>
+                  <div class="d-flex flex-wrap gap-2">
+                    <button id="save-config" class="btn btn-sm btn-primary" type="button">Save config</button>
+                    <button id="refresh-state" class="btn btn-sm btn-outline-secondary" type="button">Refresh devices</button>
+                    <button id="start-session" class="btn btn-sm btn-outline-primary" type="button">Start session</button>
+                  </div>
+                </div>
+              </div>
 
-          <div class="card">
-            <h2>Adjacent Next Topics</h2>
-            <div id="adjacent-topics" class="stack muted">No suggestions yet.</div>
-          </div>
+              <div class="card">
+                <div class="card-body">
+                  <h2 class="h6 card-title">Microphone Diagnostics</h2>
+                  <div id="microphone-diagnostics" class="vstack gap-2 text-body-secondary small">No microphone diagnostics yet.</div>
+                </div>
+              </div>
 
-          <div class="card">
-            <h2>Recovery Prompts</h2>
-            <div id="recovery-prompts" class="stack muted">No suggestions yet.</div>
-          </div>
+              <div class="card">
+                <div class="card-body">
+                  <h2 class="h6 card-title">Resume</h2>
+                  <div id="resume-list" class="vstack gap-2 text-body-secondary small">No resumable sessions.</div>
+                </div>
+              </div>
+            </div>
+          </section>
 
-          <div class="card">
-            <h2>Off-topic Observations</h2>
-            <div id="off-topic" class="stack muted">No observations yet.</div>
-          </div>
+          <section id="tab-live" class="tab-panel d-none">
+            <div class="vstack gap-3">
+              <div>
+                <div class="btn-group btn-group-sm mb-2" role="group" aria-label="Live controls">
+                  <button id="analyze-now" class="btn btn-outline-secondary" type="button">Analyze now</button>
+                  <button id="end-session" class="btn btn-outline-secondary" type="button">End session</button>
+                  <button id="undo-action" class="btn btn-outline-secondary" type="button">Undo</button>
+                </div>
+                <p id="session-meta" class="small text-body-secondary mb-0">No active session.</p>
+              </div>
 
-          <div class="card">
-            <h2>Transcript Tail</h2>
-            <div id="transcript-tail" class="stack muted">No transcript captured yet.</div>
-          </div>
+              <div class="card"><div class="card-body"><h2 class="h6 card-title">Active Topics</h2><div id="active-topics" class="vstack gap-2 text-body-secondary small">No suggestions yet.</div></div></div>
+              <div class="card"><div class="card-body"><h2 class="h6 card-title">Elaboration Starters</h2><div id="elaboration-starters" class="vstack gap-2 text-body-secondary small">No suggestions yet.</div></div></div>
+              <div class="card"><div class="card-body"><h2 class="h6 card-title">Adjacent Next Topics</h2><div id="adjacent-topics" class="vstack gap-2 text-body-secondary small">No suggestions yet.</div></div></div>
+              <div class="card"><div class="card-body"><h2 class="h6 card-title">Recovery Prompts</h2><div id="recovery-prompts" class="vstack gap-2 text-body-secondary small">No suggestions yet.</div></div></div>
+              <div class="card"><div class="card-body"><h2 class="h6 card-title">Off-topic Observations</h2><div id="off-topic" class="vstack gap-2 text-body-secondary small">No observations yet.</div></div></div>
+              <div class="card"><div class="card-body"><h2 class="h6 card-title">Transcript</h2><div id="transcript-tail" class="vstack gap-2 text-body-secondary small">No transcript captured yet.</div></div></div>
+              <div class="card"><div class="card-body"><h2 class="h6 card-title">Topic State</h2><div id="topic-state-list" class="vstack gap-2 text-body-secondary small">No active session.</div></div></div>
 
-          <div class="card">
-            <h2>Topic State</h2>
-            <div id="topic-state-list" class="stack muted">No active session.</div>
-          </div>
+              <div class="card">
+                <div class="card-body">
+                  <h2 class="h6 card-title">Mock Transcript Input</h2>
+                  <div class="mb-3">
+                    <label class="form-label small" for="mock-transcript">Use this while running with the mock STT provider.</label>
+                    <textarea id="mock-transcript" class="form-control form-control-sm" rows="4"></textarea>
+                  </div>
+                  <button id="send-mock-transcript" class="btn btn-sm btn-outline-secondary" type="button">Send transcript</button>
+                </div>
+              </div>
+            </div>
+          </section>
 
-          <div class="card">
-            <h2>Mock Transcript Input</h2>
-            <label class="field">
-              <span>Use this while running with the mock STT provider.</span>
-              <textarea id="mock-transcript" rows="4"></textarea>
-            </label>
-            <button id="send-mock-transcript">Send transcript</button>
-          </div>
+          <section id="tab-history" class="tab-panel d-none">
+            <div class="card">
+              <div class="card-body">
+                <h2 class="h6 card-title">Session Index</h2>
+                <div id="history-list" class="vstack gap-2 text-body-secondary small">No sessions yet.</div>
+              </div>
+            </div>
+          </section>
         </div>
-      </section>
-
-      <section id="tab-history" class="tab-panel">
-        <div class="card">
-          <h2>Session Index</h2>
-          <div id="history-list" class="stack muted">No sessions yet.</div>
-        </div>
-      </section>
+      </div>
     </main>
 
+    <script src="/vendor/bootstrap/js/bootstrap.bundle.min.js"></script>
     <script type="module" src="/app.js"></script>
   </body>
 </html>

@@ -3,11 +3,13 @@ import path from "node:path";
 
 import type { AppService } from "./appService.js";
 
-export function createApp(service: AppService, publicDir: string, sessionsDir: string) {
+export function createApp(service: AppService, publicDir: string, sessionsDir: string, rootDir: string) {
   const app = express();
+  const bootstrapDir = path.join(rootDir, "node_modules/bootstrap/dist");
 
   app.use(express.json());
   app.use("/artifacts", express.static(sessionsDir));
+  app.use("/vendor/bootstrap", express.static(bootstrapDir));
   app.use(express.static(publicDir));
 
   app.get("/api/state", async (_request, response) => {

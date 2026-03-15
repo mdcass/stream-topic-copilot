@@ -75,7 +75,7 @@ describe("app session flow", () => {
       new Map([["mock", new MockAnalysisProvider()]])
     );
     await service.initialize();
-    const app = createApp(service, runtimeConfig.publicDir, runtimeConfig.sessionsDir);
+    const app = createApp(service, runtimeConfig.publicDir, runtimeConfig.sessionsDir, process.cwd());
 
     const startResponse = await request(app).post("/api/session/start").expect(200);
     expect(startResponse.body.session.id).toMatch(/^2026|^20/);

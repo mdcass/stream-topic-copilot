@@ -24,7 +24,7 @@ async function main(): Promise<void> {
   const service = new AppService(runtimeConfig, sttProviders, analysisProviders);
   await service.initialize();
 
-  const app = createApp(service, runtimeConfig.publicDir, runtimeConfig.sessionsDir);
+  const app = createApp(service, runtimeConfig.publicDir, runtimeConfig.sessionsDir, runtimeConfig.rootDir);
   const server = createServer(app);
 
   const shutdown = async (status: "finished" | "interrupted") => {
