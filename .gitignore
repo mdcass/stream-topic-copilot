@@ -3,6 +3,7 @@
 /dist/
 /.env
 /.bin/
+/.models/
 /sessions/
 /coverage/
 /tmp/

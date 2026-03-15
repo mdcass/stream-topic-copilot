@@ -1,7 +1,9 @@
 const state = {
   pollingHandle: null,
   pollingIntervalMs: 2000,
-  data: null
+  data: null,
+  configDraft: null,
+  configDirty: false
 };
 
 const byId = (id) => document.getElementById(id);
@@ -28,6 +30,22 @@ function showError(message) {
 
 function clearError() {
   byId("error-banner").classList.add("hidden");
+}
+
+function collectConfigFormValues() {
+  return {
+    markdownFilePath: byId("markdown-path").value,
+    microphoneId: byId("microphone-id").value || null,
+    sttProvider: byId("stt-provider").value,
+    analysisProvider: byId("analysis-provider").value,
+    chunkSensitivity: byId("chunk-sensitivity").value,
+    analysisAutoApplyThreshold: Number(byId("analysis-threshold").value)
+  };
+}
+
+function markConfigDirty() {
+  state.configDraft = collectConfigFormValues();
+  state.configDirty = true;
 }
 
 function setTab(tabId) {
@@ -62,6 +80,36 @@ function renderSuggestions(containerId, items, titleField = "text") {
   });
 }
 
+function renderMicrophoneDiagnostics(monitor) {
+  const container = byId("microphone-diagnostics");
+  container.innerHTML = "";
+
+  const lines = [
+    `Provider: ${monitor.provider}`,
+    `Selected device: ${monitor.selectedDeviceName || "none"}`,
+    monitor.whisperCaptureId ? `Whisper capture id: ${monitor.whisperCaptureId}` : null,
+    `Probe status: ${monitor.probeStatus}`,
+    monitor.probeLastUpdatedAt ? `Last probe update: ${new Date(monitor.probeLastUpdatedAt).toLocaleTimeString()}` : null,
+    monitor.probeError ? `Probe error: ${monitor.probeError}` : null,
+    monitor.whisperLastError ? `Whisper error: ${monitor.whisperLastError}` : null,
+    ...(monitor.deviceDiagnostics || [])
+  ].filter(Boolean);
+
+  if (!lines.length) {
+    container.textContent = "No microphone diagnostics yet.";
+    container.classList.add("muted");
+    return;
+  }
+
+  container.classList.remove("muted");
+  lines.forEach((line) => {
+    const row = document.createElement("div");
+    row.className = "suggestion";
+    row.textContent = line;
+    container.appendChild(row);
+  });
+}
+
 function renderTranscriptTail(events) {
   const container = byId("transcript-tail");
   container.innerHTML = "";
@@ -76,6 +124,39 @@ function renderTranscriptTail(events) {
     const div = document.createElement("div");
     div.className = "suggestion";
     div.innerHTML = `<strong>${new Date(event.timestamp).toLocaleTimeString()}</strong><p>${event.text}</p>`;
+    container.appendChild(div);
+  });
+}
+
+function renderSubtitleChunks(session) {
+  const container = byId("transcript-tail");
+  container.innerHTML = "";
+
+  if (!session?.chunks?.length) {
+    renderTranscriptTail(session?.latestTranscriptTail || []);
+    return;
+  }
+
+  container.classList.remove("muted");
+  const sessionStart = new Date(session.startedAt).getTime();
+  const fmt = (isoTime) => {
+    const relative = Math.max(0, new Date(isoTime).getTime() - sessionStart);
+    const hours = Math.floor(relative / 3600000);
+    const minutes = Math.floor((relative % 3600000) / 60000);
+    const seconds = Math.floor((relative % 60000) / 1000);
+    const milliseconds = relative % 1000;
+    return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")},${String(milliseconds).padStart(3, "0")}`;
+  };
+
+  session.chunks.slice(-8).reverse().forEach((chunk, reverseIndex) => {
+    const ordinal = session.chunks.length - reverseIndex;
+    const div = document.createElement("div");
+    div.className = "suggestion";
+    div.innerHTML = `
+      <strong>${ordinal}</strong>
+      <p class="muted">${fmt(chunk.startedAt)} --> ${fmt(chunk.endedAt)}</p>
+      <p>${chunk.text}</p>
+    `;
     container.appendChild(div);
   });
 }
@@ -184,21 +265,31 @@ function fillSelect(select, options, selectedValue) {
 }
 
 function renderConfig(data) {
-  const { config, runtime, microphones, microphonePermission } = data;
-  byId("markdown-path").value = config.markdownFilePath || "";
-  fillSelect(byId("microphone-id"), microphones, config.microphoneId);
-  fillSelect(byId("stt-provider"), runtime.availableProviders.stt, config.sttProvider);
-  fillSelect(byId("analysis-provider"), runtime.availableProviders.analysis, config.analysisProvider);
-  byId("chunk-sensitivity").value = config.chunkSensitivity;
-  byId("analysis-threshold").value = String(config.analysisAutoApplyThreshold);
-  byId("analysis-threshold-label").textContent = `${Math.round(config.analysisAutoApplyThreshold * 100)}%`;
+  const { config, runtime, microphones, microphonePermission, microphoneMonitor } = data;
+  const effectiveConfig = state.configDirty && state.configDraft
+    ? { ...config, ...state.configDraft }
+    : config;
+
+  byId("markdown-path").value = effectiveConfig.markdownFilePath || "";
+  fillSelect(byId("microphone-id"), microphones, effectiveConfig.microphoneId);
+  fillSelect(byId("stt-provider"), runtime.availableProviders.stt, effectiveConfig.sttProvider);
+  fillSelect(byId("analysis-provider"), runtime.availableProviders.analysis, effectiveConfig.analysisProvider);
+  byId("chunk-sensitivity").value = effectiveConfig.chunkSensitivity;
+  byId("analysis-threshold").value = String(effectiveConfig.analysisAutoApplyThreshold);
+  byId("analysis-threshold-label").textContent = `${Math.round(effectiveConfig.analysisAutoApplyThreshold * 100)}%`;
   byId("permission-pill").textContent = `Mic: ${microphonePermission}`;
+  byId("mic-level-bar").style.width = `${Math.round((microphoneMonitor?.level ?? 0) * 100)}%`;
+  byId("mic-level-meta").textContent = microphoneMonitor?.probeStatus === "running"
+    ? `Probe active${microphoneMonitor.probeLastUpdatedAt ? ` · updated ${new Date(microphoneMonitor.probeLastUpdatedAt).toLocaleTimeString()}` : ""}`
+    : (microphoneMonitor?.probeError || "No probe data yet.");
+  renderMicrophoneDiagnostics(microphoneMonitor);
 }
 
 function renderLive(data) {
   const session = data.activeSession;
+  const monitor = data.microphoneMonitor;
   byId("session-pill").textContent = session ? `Active: ${session.id}` : "No active session";
-  byId("mic-level-bar").style.width = `${Math.round((session?.microphoneLevel ?? 0) * 100)}%`;
+  byId("mic-level-bar").style.width = `${Math.round((monitor?.level ?? session?.microphoneLevel ?? 0) * 100)}%`;
 
   if (!session) {
     byId("session-meta").textContent = "No active session.";
@@ -224,7 +315,7 @@ function renderLive(data) {
   renderSuggestions("adjacent-topics", session.suggestions.adjacentNextTopics);
   renderSuggestions("recovery-prompts", session.suggestions.recoveryPrompts);
   renderSuggestions("off-topic", session.offTopicObservations, "label");
-  renderTranscriptTail(session.latestTranscriptTail);
+  renderSubtitleChunks(session);
   renderTopicState(session);
 }
 
@@ -247,18 +338,15 @@ async function loadState() {
   renderHistory(data.resumableSessions, "resume-list", true);
 }
 
-async function saveConfig() {
-  await requestJson("/api/config", {
+async function saveConfig(overrides = collectConfigFormValues()) {
+  const payload = await requestJson("/api/config", {
     method: "POST",
-    body: JSON.stringify({
-      markdownFilePath: byId("markdown-path").value,
-      microphoneId: byId("microphone-id").value || null,
-      sttProvider: byId("stt-provider").value,
-      analysisProvider: byId("analysis-provider").value,
-      chunkSensitivity: byId("chunk-sensitivity").value,
-      analysisAutoApplyThreshold: Number(byId("analysis-threshold").value)
-    })
+    body: JSON.stringify(overrides)
   });
+
+  state.configDraft = payload.config;
+  state.configDirty = false;
+  return payload.config;
 }
 
 function bindEvents() {
@@ -267,7 +355,24 @@ function bindEvents() {
   });
 
   byId("analysis-threshold").addEventListener("input", (event) => {
+    markConfigDirty();
     byId("analysis-threshold-label").textContent = `${Math.round(Number(event.target.value) * 100)}%`;
+  });
+
+  byId("markdown-path").addEventListener("input", markConfigDirty);
+  byId("stt-provider").addEventListener("change", markConfigDirty);
+  byId("analysis-provider").addEventListener("change", markConfigDirty);
+  byId("chunk-sensitivity").addEventListener("change", markConfigDirty);
+
+  byId("microphone-id").addEventListener("change", async () => {
+    markConfigDirty();
+
+    try {
+      await saveConfig({ microphoneId: byId("microphone-id").value || null });
+      await loadState();
+    } catch (error) {
+      showError(error.message);
+    }
   });
 
   byId("save-config").addEventListener("click", async () => {

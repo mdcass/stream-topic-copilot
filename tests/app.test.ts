@@ -57,6 +57,7 @@ async function createRuntimeConfig(): Promise<RuntimeConfig> {
     defaultChunkSensitivity: "medium",
     visibleSuggestionCount: 3,
     microphonePermissionHelper: path.join(rootDir, ".bin/request-microphone-permission"),
+    microphoneProbeHelper: path.join(rootDir, ".bin/mic-level-probe"),
     analysisSchemaPath: path.resolve("docs/scoping/codex-analysis-response-schema.json")
   };
 }
@@ -98,5 +99,6 @@ describe("app session flow", () => {
 
     const finalState = await request(app).get("/api/state").expect(200);
     expect(finalState.body.activeSession).toBeNull();
+    expect(await fs.readFile(path.join(sessionDir, "transcript.approx.srt"), "utf8")).toContain("00:00:00,");
   });
 });

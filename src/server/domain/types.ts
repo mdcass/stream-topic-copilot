@@ -59,6 +59,7 @@ export interface RuntimeConfig {
   defaultChunkSensitivity: ChunkSensitivity;
   visibleSuggestionCount: number;
   microphonePermissionHelper: string;
+  microphoneProbeHelper: string;
   analysisSchemaPath: string;
 }
 
@@ -68,6 +69,24 @@ export interface MicrophoneDevice {
   manufacturer?: string;
   transport?: string;
   isDefault: boolean;
+  probeId?: string;
+}
+
+export type MicrophoneProbeStatus = "idle" | "running" | "error" | "unsupported";
+
+export interface MicrophoneMonitorState {
+  provider: string;
+  selectedDeviceId: string | null;
+  selectedDeviceName: string | null;
+  level: number;
+  probeStatus: MicrophoneProbeStatus;
+  probeLastUpdatedAt: string | null;
+  probeError: string | null;
+  whisperExecutable: string | null;
+  whisperModel: string | null;
+  whisperCaptureId: string | null;
+  whisperLastError: string | null;
+  deviceDiagnostics: string[];
 }
 
 export interface ParsedTopic {
@@ -122,6 +141,7 @@ export interface TranscriptEvent {
   speakerHint?: string;
   confidence?: number;
   chunkId?: string;
+  replaceLast?: boolean;
 }
 
 export interface TranscriptChunk {
@@ -167,6 +187,10 @@ export interface SessionSnapshot {
   latestTranscriptTail: TranscriptEvent[];
   latestAnalysisAt: string | null;
   proposedMarkdownPath: string;
+  liveTranscriptPath: string | null;
+  recordedAudioPath: string | null;
+  approximateTranscriptSrtPath: string | null;
+  finalTranscriptSrtPath: string | null;
   chunkSensitivity: ChunkSensitivity;
   document: ParsedTopicsDocument;
   topics: Record<string, TopicRecord>;
@@ -212,6 +236,7 @@ export interface AppStateResponse {
   };
   microphonePermission: MicrophonePermissionState;
   microphones: MicrophoneDevice[];
+  microphoneMonitor: MicrophoneMonitorState;
   resumableSessions: HistoryEntry[];
   history: HistoryEntry[];
   activeSession: SessionSnapshot | null;

@@ -9,11 +9,11 @@ The project is runnable without external services by using the default mock prov
 ### Prerequisites
 
 - macOS on Apple Silicon
+- Homebrew
 - Node.js 22+
 - npm 10+
 - `swiftc` if you want the microphone permission helper compiled during install
 - Codex CLI if you want live analysis with `ANALYSIS_PROVIDER=codex`
-- `whisper.cpp` if you want live STT with `STT_PROVIDER=whisper`
 
 ### First-time setup
 
@@ -23,41 +23,60 @@ cd stream-topic-copilot
 bash scripts/install.sh
 ```
 
-`install.sh` does four things:
+`install.sh` does eight things:
 
 1. installs npm dependencies
 2. creates `.env` from `.env.example` if needed
-3. compiles `scripts/request-microphone-permission.swift` into `.bin/request-microphone-permission`
-4. invokes the helper once so macOS can grant microphone access
+3. installs `whisper-cpp` with Homebrew when it is available
+4. downloads a Whisper model locally and updates `.env` to use the Whisper provider
+5. compiles an SDL-based audio-device helper so the app can use Whisper-compatible capture IDs
+6. compiles a native mic activity probe helper for the Config view diagnostics
+7. compiles `scripts/request-microphone-permission.swift` into `.bin/request-microphone-permission`
+8. invokes the permission helper once so macOS can grant microphone access
+
+The installer prints numbered progress steps while it runs.
+
+To choose a model at install time:
+
+```bash
+bash scripts/install.sh medium.en
+```
+
+If no model is provided, the installer defaults to `small.en`.
 
 ### Whisper.cpp setup
 
-Whisper is not bundled in this repository. You need to install or build it separately, then wire the binary and model path in `.env`.
-
-Suggested steps:
-
-```bash
-git clone https://github.com/ggerganov/whisper.cpp.git
-cd whisper.cpp
-sh ./models/download-ggml-model.sh small.en
-# build the project
-cmake -B build
-cmake --build build -j --config Release
-```
-
-Then set the corresponding values in `.env`:
+Whisper is not bundled in this repository, but `install.sh` now installs the Homebrew `whisper-cpp` formula, downloads the selected model, and updates `.env` to:
 
 ```bash
 STT_PROVIDER=whisper
-STT_EXECUTABLE=/absolute/path/to/whisper.cpp/build/bin/whisper-stream
-WHISPER_MODEL=/absolute/path/to/whisper.cpp/models/ggml-small.en.bin
+STT_EXECUTABLE=/opt/homebrew/bin/...
+WHISPER_MODEL=/absolute/path/to/repo/.models/whisper.cpp/ggml-small.en.bin
 ```
 
 Notes:
 
 - `small.en` is the recommended starting model.
-- The current `WhisperCppProvider` expects a streaming-compatible binary that emits transcript lines to stdout.
+- Models are downloaded into `.models/whisper.cpp/` inside the repo and ignored by git.
+- `install.sh` sets `STT_EXECUTABLE` automatically from the Homebrew `whisper-cpp` install.
+- The app now enumerates Whisper devices through an SDL helper so the selected capture ID matches what `whisper-stream` expects.
+- The Config view includes a separate native microphone activity probe and device diagnostics.
+- The current `WhisperCppProvider` expects a streaming-compatible binary such as `whisper-stream` that emits transcript lines to stdout.
 - If microphone permission was denied previously, rerun `./.bin/request-microphone-permission request` after fixing macOS privacy settings.
+
+### Manual Whisper.cpp build fallback
+
+If you prefer not to use the Homebrew package, you can still build `whisper.cpp` manually. In that path, `cmake` is required:
+
+```bash
+brew install cmake
+git clone https://github.com/ggml-org/whisper.cpp.git
+cd whisper.cpp
+cmake -B build
+cmake --build build -j
+```
+
+Then point `STT_EXECUTABLE` and `WHISPER_MODEL` at your built binary and downloaded model file.
 
 ### Codex CLI setup
 
@@ -146,6 +165,9 @@ sessions/<session-id>/
   session-summary.json
   source-topics.md
   proposed-final.md
+  live-transcript.txt
+  transcript.approx.srt
+  transcript.final.srt
   transcript.events.jsonl
   transcript.chunks.jsonl
   analysis.requests.jsonl
@@ -153,6 +175,11 @@ sessions/<session-id>/
   analysis.raw.jsonl
   topic-state-history.jsonl
 ```
+
+Notes:
+
+- `transcript.approx.srt` is generated from the app’s internal chunk timing and is always available after session end.
+- `transcript.final.srt` is generated from the saved Whisper WAV via `whisper-cli` when the final post-pass succeeds.
 
 ## Runbook
 
@@ -170,6 +197,7 @@ sessions/<session-id>/
 - Topic buttons let you set `partial`, `covered`, `snoozed`, or `dismissed`.
 - `Undo` reverts the most recent direct state change.
 - The UI polls `/api/state` and refreshes transcript tail, suggestions, warnings, and topic state.
+- The transcript card now renders finalized chunks in an SRT-like format for easier reading during the session.
 
 ### Ending a session
 

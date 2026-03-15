@@ -61,6 +61,7 @@ export function loadRuntimeConfig(): RuntimeConfig {
     defaultChunkSensitivity: parseSensitivity(process.env.CHUNK_SENSITIVITY),
     visibleSuggestionCount: parseNumber(process.env.VISIBLE_SUGGESTION_COUNT, 3),
     microphonePermissionHelper: resolveFromRoot(process.env.MIC_PERMISSION_HELPER, "./.bin/request-microphone-permission"),
+    microphoneProbeHelper: resolveFromRoot(process.env.MIC_PROBE_HELPER, "./.bin/mic-level-probe"),
     analysisSchemaPath: resolveFromRoot(undefined, "./docs/scoping/codex-analysis-response-schema.json")
   };
 }

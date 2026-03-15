@@ -39,8 +39,9 @@
             <select id="microphone-id"></select>
           </label>
           <div class="field">
-            <span>Microphone level</span>
+            <span>Microphone activity</span>
             <div class="meter"><span id="mic-level-bar"></span></div>
+            <p id="mic-level-meta" class="muted">No probe data yet.</p>
           </div>
           <label class="field">
             <span>STT provider</span>
@@ -68,6 +69,11 @@
             <button id="refresh-state" class="secondary">Refresh devices</button>
             <button id="start-session" class="accent">Start session</button>
           </div>
+        </div>
+
+        <div class="card">
+          <h2>Microphone Diagnostics</h2>
+          <div id="microphone-diagnostics" class="stack muted">No microphone diagnostics yet.</div>
         </div>
 
         <div class="card">

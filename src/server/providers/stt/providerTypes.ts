@@ -13,10 +13,13 @@ export interface SttProviderSession {
 
 export interface StartSttOptions {
   microphoneId: string | null;
+  sessionDir?: string;
+  liveTranscriptPath?: string;
 }
 
 export interface SttProvider {
   readonly name: string;
   listDevices(): Promise<MicrophoneDevice[]>;
   start(options: StartSttOptions, handlers: SttProviderHandlers): Promise<SttProviderSession>;
+  getDebugState?(): Record<string, string | null>;
 }

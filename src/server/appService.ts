@@ -1,6 +1,8 @@
+import fs from "node:fs/promises";
 import path from "node:path";
 
 import { codexAnalysisResponseSchema } from "./domain/analysis/schema.js";
+import { buildApproximateSrt } from "./domain/transcript/subtitles.js";
 import {
   createDefaultAppConfig,
   createEmptySuggestions,
@@ -8,6 +10,7 @@ import {
   type AppStateResponse,
   type ChunkSensitivity,
   type MicrophoneDevice,
+  type MicrophoneMonitorState,
   type RuntimeConfig,
   type SessionSnapshot,
   type TopicRecord,
@@ -21,6 +24,7 @@ import { parseTopicsMarkdown } from "./domain/topics/markdownParser.js";
 import { buildProposedMarkdown } from "./domain/topics/proposedMarkdown.js";
 import { FileStore } from "./infra/fileStore.js";
 import { getMicrophonePermissionState } from "./infra/microphonePermission.js";
+import { MicrophoneProbe } from "./infra/microphoneProbe.js";
 import type { AnalysisProvider } from "./providers/analysis/providerTypes.js";
 import type { SttProvider, SttProviderSession } from "./providers/stt/providerTypes.js";
 
@@ -83,9 +87,13 @@ function cloneSession(session: SessionSnapshot): SessionSnapshot {
 
 export class AppService {
   private readonly fileStore: FileStore;
+  private readonly microphoneProbe: MicrophoneProbe;
   private activeSession: SessionSnapshot | null = null;
   private activeSttSession: SttProviderSession | null = null;
   private config!: AppConfig;
+  private microphones: MicrophoneDevice[] = [];
+  private activeProbeSelectionKey: string | null = null;
+  private microphoneMonitor: MicrophoneMonitorState;
 
   constructor(
     private readonly runtimeConfig: RuntimeConfig,
@@ -93,6 +101,21 @@ export class AppService {
     private readonly analysisProviders: Map<string, AnalysisProvider>
   ) {
     this.fileStore = new FileStore(runtimeConfig);
+    this.microphoneProbe = new MicrophoneProbe(runtimeConfig);
+    this.microphoneMonitor = {
+      provider: runtimeConfig.sttProvider,
+      selectedDeviceId: null,
+      selectedDeviceName: null,
+      level: 0,
+      probeStatus: "idle",
+      probeLastUpdatedAt: null,
+      probeError: null,
+      whisperExecutable: runtimeConfig.sttExecutable || null,
+      whisperModel: runtimeConfig.whisperModel || null,
+      whisperCaptureId: null,
+      whisperLastError: null,
+      deviceDiagnostics: []
+    };
   }
 
   async initialize(): Promise<void> {
@@ -109,11 +132,12 @@ export class AppService {
     }
 
     this.config = await this.fileStore.loadConfig(defaultConfig);
+    await this.refreshMicrophonesAndMonitor();
   }
 
   async getState(): Promise<AppStateResponse> {
     const [microphones, microphonePermission, sessions] = await Promise.all([
-      this.listMicrophones(),
+      this.refreshMicrophonesAndMonitor(),
       getMicrophonePermissionState(this.runtimeConfig),
       this.fileStore.listSessions()
     ]);
@@ -134,6 +158,7 @@ export class AppService {
       },
       microphonePermission,
       microphones,
+      microphoneMonitor: this.microphoneMonitor,
       resumableSessions,
       history,
       activeSession: this.activeSession
@@ -154,6 +179,8 @@ export class AppService {
       }
     };
     await this.fileStore.saveConfig(this.config);
+
+    await this.refreshMicrophonesAndMonitor();
 
     if (this.activeSession && (nextConfig.microphoneId !== undefined || nextConfig.sttProvider !== undefined)) {
       await this.restartStt();
@@ -186,6 +213,10 @@ export class AppService {
       latestTranscriptTail: [],
       latestAnalysisAt: null,
       proposedMarkdownPath: artifacts.proposedMarkdownPath,
+      liveTranscriptPath: path.join(artifacts.sessionDir, "live-transcript.txt"),
+      recordedAudioPath: null,
+      approximateTranscriptSrtPath: path.join(artifacts.sessionDir, "transcript.approx.srt"),
+      finalTranscriptSrtPath: null,
       chunkSensitivity: this.config.chunkSensitivity,
       document,
       topics,
@@ -235,6 +266,7 @@ export class AppService {
 
     loaded.status = "active";
     this.activeSession = loaded;
+    await this.refreshMicrophonesAndMonitor();
     await this.writeSessionArtifacts();
     await this.startSttForActiveSession();
     return cloneSession(this.activeSession);
@@ -253,6 +285,7 @@ export class AppService {
     this.activeSession.status = status;
     this.activeSession.endedAt = nowIso();
     await this.finalizePendingChunk(true);
+    await this.exportTranscriptArtifacts(this.activeSession);
     await this.writeSessionArtifacts();
     await this.fileStore.writeFile(
       path.join(this.fileStore.sessionDir(this.activeSession.id), "session-summary.json"),
@@ -268,6 +301,7 @@ export class AppService {
 
     const finished = cloneSession(this.activeSession);
     this.activeSession = null;
+    await this.refreshMicrophonesAndMonitor();
     return finished;
   }
 
@@ -347,13 +381,55 @@ export class AppService {
     return cloneSession(this.activeSession);
   }
 
-  private async listMicrophones(): Promise<MicrophoneDevice[]> {
+  private async refreshMicrophonesAndMonitor(): Promise<MicrophoneDevice[]> {
     const provider = this.sttProviders.get(this.config.sttProvider) ?? this.sttProviders.get(this.runtimeConfig.sttProvider);
     if (!provider) {
+      this.microphones = [];
+      this.microphoneMonitor.provider = this.config.sttProvider;
+      this.microphoneMonitor.probeStatus = "unsupported";
+      this.microphoneMonitor.deviceDiagnostics = [`Unknown STT provider: ${this.config.sttProvider}`];
       return [];
     }
 
-    return provider.listDevices();
+    const devices = await provider.listDevices();
+    this.microphones = await this.microphoneProbe.annotateDevices(devices);
+
+    const selectedDevice = this.microphones.find((device) => device.id === this.config.microphoneId) ?? null;
+    this.microphoneMonitor.provider = this.config.sttProvider;
+    this.microphoneMonitor.selectedDeviceId = this.config.microphoneId;
+    this.microphoneMonitor.selectedDeviceName = selectedDevice?.name ?? null;
+    this.microphoneMonitor.whisperCaptureId = this.config.sttProvider === "whisper" ? this.config.microphoneId : null;
+    this.microphoneMonitor.whisperExecutable = this.config.sttProvider === "whisper" ? (this.runtimeConfig.sttExecutable || null) : null;
+    this.microphoneMonitor.whisperModel = this.config.sttProvider === "whisper" ? (this.runtimeConfig.whisperModel || null) : null;
+
+    const debugState = provider.getDebugState?.() ?? {};
+    this.microphoneMonitor.whisperLastError = debugState.whisperLastError ?? this.microphoneMonitor.whisperLastError;
+    const diagnostics: string[] = [];
+    if (selectedDevice) {
+      diagnostics.push(`Selected device: ${selectedDevice.name} (capture id ${selectedDevice.id})`);
+      if (selectedDevice.probeId) {
+        diagnostics.push("Native activity probe mapped successfully.");
+      } else {
+        diagnostics.push("Native activity probe could not map this device by name.");
+      }
+    } else if (this.config.microphoneId) {
+      diagnostics.push(`Configured microphone id ${this.config.microphoneId} is not present in the current device list.`);
+    } else {
+      diagnostics.push("No microphone selected.");
+    }
+    if (debugState.whisperDeviceEnumerationError) {
+      diagnostics.push(`Whisper device enumeration error: ${debugState.whisperDeviceEnumerationError}`);
+    }
+    if (debugState.whisperExecutable) {
+      diagnostics.push(`Whisper executable: ${debugState.whisperExecutable}`);
+    }
+    if (debugState.whisperModel) {
+      diagnostics.push(`Whisper model: ${debugState.whisperModel}`);
+    }
+    this.microphoneMonitor.deviceDiagnostics = diagnostics;
+
+    await this.refreshMicrophoneProbe(selectedDevice);
+    return this.microphones;
   }
 
   private async startSttForActiveSession(): Promise<void> {
@@ -367,13 +443,18 @@ export class AppService {
     }
 
     this.activeSttSession = await provider.start(
-      { microphoneId: this.activeSession.microphoneSelection },
+      {
+        microphoneId: this.activeSession.microphoneSelection,
+        sessionDir: this.fileStore.sessionDir(this.activeSession.id),
+        liveTranscriptPath: this.activeSession.liveTranscriptPath ?? undefined
+      },
       {
         onTranscript: async (event) => this.handleTranscriptEvent(event),
         onLevel: async (level) => this.handleLevel(level),
         onError: async (error) => this.handleProviderError(error)
       }
     );
+    this.microphoneMonitor.whisperCaptureId = this.activeSession.microphoneSelection;
   }
 
   private async restartStt(): Promise<void> {
@@ -388,19 +469,21 @@ export class AppService {
 
     this.activeSession.microphoneSelection = this.config.microphoneId;
     this.activeSession.sttProvider = this.config.sttProvider;
+    await this.refreshMicrophonesAndMonitor();
     await this.startSttForActiveSession();
     await this.writeSessionArtifacts();
   }
 
   private async handleLevel(level: number): Promise<void> {
-    if (!this.activeSession) {
-      return;
+    this.microphoneMonitor.level = level;
+    this.microphoneMonitor.probeLastUpdatedAt = nowIso();
+    if (this.activeSession) {
+      this.activeSession.microphoneLevel = level;
     }
-
-    this.activeSession.microphoneLevel = level;
   }
 
   private async handleProviderError(error: Error): Promise<void> {
+    this.microphoneMonitor.whisperLastError = error.message;
     if (!this.activeSession) {
       return;
     }
@@ -409,14 +492,88 @@ export class AppService {
     await this.writeSessionArtifacts();
   }
 
+  private async refreshMicrophoneProbe(selectedDevice: MicrophoneDevice | null): Promise<void> {
+    if (this.config.sttProvider !== "whisper") {
+      if (this.activeProbeSelectionKey !== null) {
+        await this.microphoneProbe.stop();
+        this.activeProbeSelectionKey = null;
+      }
+      this.microphoneMonitor.level = 0;
+      this.microphoneMonitor.probeStatus = "idle";
+      this.microphoneMonitor.probeError = null;
+      return;
+    }
+
+    if (!selectedDevice) {
+      if (this.activeProbeSelectionKey !== null) {
+        await this.microphoneProbe.stop();
+        this.activeProbeSelectionKey = null;
+      }
+      this.microphoneMonitor.level = 0;
+      this.microphoneMonitor.probeStatus = "idle";
+      this.microphoneMonitor.probeError = "Select a microphone to start the activity probe.";
+      return;
+    }
+
+    if (!selectedDevice.probeId) {
+      if (this.activeProbeSelectionKey !== `${selectedDevice.id}:unmapped`) {
+        await this.microphoneProbe.stop();
+      }
+      this.activeProbeSelectionKey = `${selectedDevice.id}:unmapped`;
+      this.microphoneMonitor.level = 0;
+      this.microphoneMonitor.probeStatus = "error";
+      this.microphoneMonitor.probeError = `No native probe mapping found for ${selectedDevice.name}.`;
+      return;
+    }
+
+    const nextSelectionKey = `${selectedDevice.id}:${selectedDevice.probeId}`;
+    if (this.activeProbeSelectionKey === nextSelectionKey) {
+      return;
+    }
+
+    this.microphoneMonitor.probeStatus = "running";
+    this.microphoneMonitor.probeError = null;
+    await this.microphoneProbe.start(selectedDevice, {
+      onLevel: (level) => {
+        this.microphoneMonitor.level = level;
+        this.microphoneMonitor.probeLastUpdatedAt = nowIso();
+        if (this.activeSession) {
+          this.activeSession.microphoneLevel = level;
+        }
+      },
+      onError: (message) => {
+        this.microphoneMonitor.probeStatus = "error";
+        this.microphoneMonitor.probeError = message;
+      }
+    });
+    this.activeProbeSelectionKey = nextSelectionKey;
+  }
+
   private async handleTranscriptEvent(event: TranscriptEvent): Promise<void> {
     if (!this.activeSession) {
       return;
     }
 
-    this.activeSession.latestTranscriptTail.push(event);
+    if (event.replaceLast && this.activeSession.pendingTranscriptEvents.length > 0) {
+      const lastPending = this.activeSession.pendingTranscriptEvents[this.activeSession.pendingTranscriptEvents.length - 1];
+      if (!lastPending.chunkId) {
+        this.activeSession.pendingTranscriptEvents[this.activeSession.pendingTranscriptEvents.length - 1] = event;
+      } else {
+        this.activeSession.pendingTranscriptEvents.push(event);
+      }
+
+      const tailIndex = this.activeSession.latestTranscriptTail.length - 1;
+      if (tailIndex >= 0 && !this.activeSession.latestTranscriptTail[tailIndex].chunkId) {
+        this.activeSession.latestTranscriptTail[tailIndex] = event;
+      } else {
+        this.activeSession.latestTranscriptTail.push(event);
+      }
+    } else {
+      this.activeSession.latestTranscriptTail.push(event);
+      this.activeSession.pendingTranscriptEvents.push(event);
+    }
+
     this.activeSession.latestTranscriptTail = this.activeSession.latestTranscriptTail.slice(-this.config.transcriptTailSize);
-    this.activeSession.pendingTranscriptEvents.push(event);
     await this.fileStore.appendJsonl(this.activeSession.id, "transcript.events.jsonl", event);
 
     const chunk = this.buildChunk(false);
@@ -668,5 +825,103 @@ export class AppService {
     }
 
     await this.fileStore.saveSession(this.activeSession);
+  }
+
+  private async exportTranscriptArtifacts(session: SessionSnapshot): Promise<void> {
+    const approximateSrt = buildApproximateSrt(session);
+    await this.fileStore.writeFile(session.approximateTranscriptSrtPath ?? path.join(this.fileStore.sessionDir(session.id), "transcript.approx.srt"), approximateSrt);
+
+    if (session.sttProvider !== "whisper") {
+      session.finalTranscriptSrtPath = session.approximateTranscriptSrtPath;
+      return;
+    }
+
+    const recordedAudioPath = await this.findRecordedAudioPath(session.id);
+    session.recordedAudioPath = recordedAudioPath;
+    if (!recordedAudioPath) {
+      session.finalTranscriptSrtPath = session.approximateTranscriptSrtPath;
+      return;
+    }
+
+    const whisperCliPath = this.resolveWhisperCliPath();
+    if (!whisperCliPath) {
+      session.finalTranscriptSrtPath = session.approximateTranscriptSrtPath;
+      return;
+    }
+
+    try {
+      const outputBase = path.join(this.fileStore.sessionDir(session.id), "transcript.final");
+      const { spawn } = await import("node:child_process");
+      await new Promise<void>((resolve, reject) => {
+        const child = spawn(whisperCliPath, [
+          "-m",
+          this.runtimeConfig.whisperModel,
+          "-f",
+          recordedAudioPath,
+          "-osrt",
+          "-ojf",
+          "-sow",
+          "-of",
+          outputBase,
+          "-np"
+        ], {
+          stdio: ["ignore", "pipe", "pipe"]
+        });
+
+        let stderr = "";
+        child.stderr.setEncoding("utf8");
+        child.stderr.on("data", (chunk: string) => {
+          stderr += chunk;
+        });
+
+        child.on("error", reject);
+        child.on("exit", (code) => {
+          if (code === 0) {
+            resolve();
+            return;
+          }
+
+          reject(new Error(stderr.trim() || `whisper-cli exited with code ${code}`));
+        });
+      });
+
+      const finalSrtPath = `${outputBase}.srt`;
+      if (await this.fileStore.exists(finalSrtPath)) {
+        session.finalTranscriptSrtPath = finalSrtPath;
+      } else {
+        session.finalTranscriptSrtPath = session.approximateTranscriptSrtPath;
+      }
+    } catch (error) {
+      session.lastError = `${session.lastError ? `${session.lastError} · ` : ""}Final subtitle export failed: ${error instanceof Error ? error.message : String(error)}`;
+      session.finalTranscriptSrtPath = session.approximateTranscriptSrtPath;
+    }
+  }
+
+  private async findRecordedAudioPath(sessionId: string): Promise<string | null> {
+    const sessionDir = this.fileStore.sessionDir(sessionId);
+    const entries = await fs.readdir(sessionDir).catch(() => []);
+    const candidates = entries
+      .filter((name) => name.toLowerCase().endsWith(".wav"))
+      .map((name) => path.join(sessionDir, name));
+
+    if (candidates.length === 0) {
+      return null;
+    }
+
+    const stats = await Promise.all(candidates.map(async (target) => ({
+      target,
+      stat: await fs.stat(target)
+    })));
+    stats.sort((left, right) => right.stat.mtimeMs - left.stat.mtimeMs);
+    return stats[0]?.target ?? null;
+  }
+
+  private resolveWhisperCliPath(): string | null {
+    if (!this.runtimeConfig.sttExecutable) {
+      return null;
+    }
+
+    const candidate = path.join(path.dirname(this.runtimeConfig.sttExecutable), "whisper-cli");
+    return candidate;
   }
 }
