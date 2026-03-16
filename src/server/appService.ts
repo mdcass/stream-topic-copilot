@@ -28,6 +28,8 @@ import type { TopicDecision } from "./domain/analysis/schema.js";
 import { parseTopicsMarkdown } from "./domain/topics/markdownParser.js";
 import { buildProposedMarkdown } from "./domain/topics/proposedMarkdown.js";
 import { FileStore } from "./infra/fileStore.js";
+import { analyzeWaveSignal } from "./infra/audioSignal.js";
+import { findRecommendedSystemMixSource } from "./infra/inputSourceCatalog.js";
 import { getMicrophonePermissionState, requestMicrophonePermission } from "./infra/microphonePermission.js";
 import { MicrophoneProbe } from "./infra/microphoneProbe.js";
 import { NativeSystemAudioHelper, type NativeCaptureSession } from "./infra/nativeSystemAudioHelper.js";
@@ -42,8 +44,7 @@ const sensitivityDefaults: Record<ChunkSensitivity, { words: number; seconds: nu
 };
 
 const execFileAsync = promisify(execFile);
-const SYSTEM_MIX_SOURCE_ID = "system-mix:default";
-const SYSTEM_MIX_TARGET_ID = "all-displays";
+const NATIVE_SYSTEM_AUDIO_UNAVAILABLE_REASON = "Native display/app audio is disabled until a signed helper identity is available.";
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -188,68 +189,15 @@ function groupLabelForSourceKind(kind: SelectedCaptureSourceConfig["kind"]): str
   }
 }
 
-function collapseCatalogSources(sources: CaptureSourceDescriptor[], options: { preferNativeSystemMix: boolean; nativeHelperConfigured: boolean; }): CaptureSourceDescriptor[] {
+function collapseCatalogSources(sources: CaptureSourceDescriptor[]): CaptureSourceDescriptor[] {
   const inputSources = sources.filter((source) => source.transport === "input-device");
   const nonInputSources = sources.filter((source) => source.transport !== "input-device");
-  const microphones = inputSources.filter((source) => source.kind === "microphone");
-  const systemMixCandidates = options.preferNativeSystemMix
-    ? nonInputSources.filter((source) => source.kind === "native-display-audio")
-    : inputSources.filter((source) => source.kind === "system-mix" || source.kind === "loopback-input");
-  const collapsedSystemMix = createSystemMixSource(systemMixCandidates, options);
 
   return [
-    ...microphones,
-    ...(collapsedSystemMix ? [collapsedSystemMix] : []),
+    ...inputSources.filter((source) => source.kind === "microphone"),
+    ...inputSources.filter((source) => source.kind === "system-mix"),
     ...nonInputSources
   ];
-}
-
-function createSystemMixSource(
-  candidates: CaptureSourceDescriptor[],
-  options: { preferNativeSystemMix: boolean; nativeHelperConfigured: boolean; }
-): CaptureSourceDescriptor | null {
-  if (candidates.length === 0 && !options.preferNativeSystemMix) {
-    return null;
-  }
-
-  if (options.preferNativeSystemMix && !options.nativeHelperConfigured) {
-    return null;
-  }
-
-  if (options.preferNativeSystemMix) {
-    const displayNames = candidates.map((candidate) => candidate.name).sort();
-    return {
-      id: SYSTEM_MIX_SOURCE_ID,
-      name: "Desktop Audio",
-      kind: "system-mix",
-      groupLabel: "Desktop Audio",
-      transport: "screencapturekit",
-      isDefault: true,
-      nativeTargetId: SYSTEM_MIX_TARGET_ID,
-      details: displayNames.length > 0
-        ? `Captures audio across ${displayNames.length} display${displayNames.length === 1 ? "" : "s"}: ${displayNames.join(", ")}.`
-        : "Captures audio across all available displays."
-    };
-  }
-
-  if (candidates.length === 0) {
-    return null;
-  }
-
-  const preferred = candidates.find((candidate) => candidate.isDefault) ?? candidates[0];
-  const backingNames = candidates.map((candidate) => candidate.name).sort();
-
-  return {
-    ...preferred,
-    id: SYSTEM_MIX_SOURCE_ID,
-    name: "Desktop Audio",
-    kind: "system-mix",
-    groupLabel: "Desktop Audio",
-    isDefault: true,
-    details: backingNames.length > 1
-      ? `Backed by ${backingNames.join(", ")}.`
-      : `Backed by ${preferred.name}.`
-  };
 }
 
 function fallbackDescriptorFromSelection(source: SelectedCaptureSourceConfig): CaptureSourceDescriptor {
@@ -259,8 +207,6 @@ function fallbackDescriptorFromSelection(source: SelectedCaptureSourceConfig): C
       ? source.id
       : source.kind === "native-app-audio" && source.id.startsWith("app:")
         ? source.id.slice("app:".length)
-        : source.kind === "system-mix"
-          ? SYSTEM_MIX_TARGET_ID
         : undefined;
   const bundleId = source.kind === "native-app-audio" && source.id.startsWith("app-bundle:")
     ? source.id.slice("app-bundle:".length)
@@ -271,12 +217,12 @@ function fallbackDescriptorFromSelection(source: SelectedCaptureSourceConfig): C
     name: source.name,
     kind: source.kind,
     groupLabel: groupLabelForSourceKind(source.kind),
-    transport: isNativeCaptureSourceKind(source.kind) || source.kind === "system-mix" ? "screencapturekit" : "mock",
+    transport: isNativeCaptureSourceKind(source.kind) ? "screencapturekit" : "mock",
     isDefault: false,
     nativeTargetId,
     bundleId,
     details: source.kind === "system-mix"
-      ? "Will retry Desktop Audio when display enumeration and system audio permission are available."
+      ? "Will retry Desktop Audio when a routed system-mix input device is available."
       : isNativeCaptureSourceKind(source.kind)
       ? "Will retry this native source when system audio permission and enumeration are available."
       : undefined
@@ -298,7 +244,7 @@ function describeSystemAudioPermissionIssue(permission: string): string {
 
 function describeUnavailableSource(source: CaptureSourceDescriptor, nativeCatalogError: string | null): string {
   if (source.kind === "system-mix") {
-    return nativeCatalogError || "Desktop Audio is unavailable because display audio targets could not be enumerated.";
+    return "Desktop Audio is unavailable because no routed system-mix input device was found. Install BlackHole and route system audio to it.";
   }
 
   if (isNativeCaptureSourceKind(source.kind) && nativeCatalogError) {
@@ -309,11 +255,11 @@ function describeUnavailableSource(source: CaptureSourceDescriptor, nativeCatalo
 }
 
 function sourceNeedsMicrophonePermission(source: SelectedCaptureSourceConfig): boolean {
-  return source.kind === "microphone" || source.kind === "loopback-input";
+  return source.kind === "microphone" || source.kind === "loopback-input" || source.kind === "system-mix";
 }
 
-function sourceNeedsSystemAudioPermission(source: SelectedCaptureSourceConfig): boolean {
-  return source.kind === "system-mix" || isNativeCaptureSourceKind(source.kind);
+function sourceNeedsSystemAudioPermission(source: SelectedCaptureSourceConfig, options: { nativeCaptureEnabled: boolean; }): boolean {
+  return options.nativeCaptureEnabled && isNativeCaptureSourceKind(source.kind);
 }
 
 export class AppService {
@@ -391,7 +337,9 @@ export class AppService {
 
   async requestRelevantPermissions(): Promise<AppStateResponse> {
     const needsMicrophone = this.config.captureSources.some((source) => sourceNeedsMicrophonePermission(source));
-    const needsSystemAudio = this.config.captureSources.some((source) => sourceNeedsSystemAudioPermission(source));
+    const needsSystemAudio = this.config.captureSources.some((source) => sourceNeedsSystemAudioPermission(source, {
+      nativeCaptureEnabled: this.runtimeConfig.enableNativeSystemAudioCapture
+    }));
 
     if (needsMicrophone) {
       await requestMicrophonePermission(this.runtimeConfig);
@@ -414,7 +362,9 @@ export class AppService {
 
   async openRelevantPrivacySettings(): Promise<AppStateResponse> {
     const needsMicrophone = this.config.captureSources.some((source) => sourceNeedsMicrophonePermission(source));
-    const needsSystemAudio = this.config.captureSources.some((source) => sourceNeedsSystemAudioPermission(source));
+    const needsSystemAudio = this.config.captureSources.some((source) => sourceNeedsSystemAudioPermission(source, {
+      nativeCaptureEnabled: this.runtimeConfig.enableNativeSystemAudioCapture
+    }));
 
     if (needsSystemAudio) {
       await openPrivacyPane("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture");
@@ -670,11 +620,12 @@ export class AppService {
     const nativeCatalog = this.config.sttProvider === "whisper"
       ? await this.nativeSystemAudioHelper.listSourceCatalog()
       : { sources: [], permissionState: "unavailable" as const, error: null };
-    const nativeSources = nativeCatalog.sources;
-    this.captureSourceCatalog = dedupeSources(collapseCatalogSources([...annotatedInputSources, ...nativeSources], {
-      preferNativeSystemMix: this.config.sttProvider === "whisper",
-      nativeHelperConfigured: Boolean(this.runtimeConfig.nativeSystemAudioHelper)
+    const nativeSources = nativeCatalog.sources.map((source) => ({
+      ...source,
+      available: this.runtimeConfig.enableNativeSystemAudioCapture,
+      availabilityReason: this.runtimeConfig.enableNativeSystemAudioCapture ? undefined : NATIVE_SYSTEM_AUDIO_UNAVAILABLE_REASON
     }));
+    this.captureSourceCatalog = dedupeSources(collapseCatalogSources([...annotatedInputSources, ...nativeSources]));
     this.config.captureSources = this.config.captureSources.map((source) => {
       const hydrated = this.findCatalogSource(source.id, source);
       return hydrated ? selectedSourceFromDescriptor(hydrated) : source;
@@ -700,6 +651,10 @@ export class AppService {
         whisperCaptureId: source.transport === "input-device" ? (source.inputDeviceId ?? null) : null,
         deviceDiagnostics: buildDiagnostics(source, this.config.sttProvider)
       };
+      if (source.available === false) {
+        nextMonitors[source.id].status = "unsupported";
+        nextMonitors[source.id].error = source.availabilityReason ?? "Selected source is unavailable.";
+      }
       if (!resolvedSource) {
         nextMonitors[source.id].status = "error";
         nextMonitors[source.id].error = isNativeCaptureSourceKind(source.kind) && nativeCatalog.permissionState !== "granted"
@@ -750,9 +705,7 @@ export class AppService {
     }
 
     if (fallbackSource.kind === "system-mix" || fallbackSource.kind === "loopback-input") {
-      return this.captureSourceCatalog.find((source) =>
-        source.kind === "system-mix"
-      ) ?? null;
+      return findRecommendedSystemMixSource(this.captureSourceCatalog) ?? null;
     }
 
     return null;
@@ -813,10 +766,29 @@ export class AppService {
       : "unavailable";
 
     for (const selectedSource of this.activeSession.captureSources) {
-      const source = this.findCatalogSource(selectedSource.id, selectedSource) ?? fallbackDescriptorFromSelection(selectedSource);
+      const resolvedSource = this.findCatalogSource(selectedSource.id, selectedSource);
+      const source = resolvedSource ?? fallbackDescriptorFromSelection(selectedSource);
       const monitor = this.ensureSessionSourceMonitor(source);
       const sessionDir = sourceArtifactsDir(this.fileStore.sessionDir(this.activeSession.id), source.id);
       await fs.mkdir(sessionDir, { recursive: true });
+
+      if (!resolvedSource) {
+        monitor.status = "error";
+        monitor.error = isNativeCaptureSourceKind(source.kind) && systemAudioPermission !== "granted"
+          ? describeSystemAudioPermissionIssue(systemAudioPermission)
+          : describeUnavailableSource(source, null);
+        monitor.lastUpdatedAt = nowIso();
+        this.syncMonitorToSession(source.id);
+        continue;
+      }
+
+      if (source.available === false) {
+        monitor.status = "unsupported";
+        monitor.error = source.availabilityReason ?? "Selected source is unavailable.";
+        monitor.lastUpdatedAt = nowIso();
+        this.syncMonitorToSession(source.id);
+        continue;
+      }
 
       if (source.transport === "screencapturekit" && this.activeSession.sttProvider === "whisper") {
         if (systemAudioPermission !== "granted") {
@@ -988,6 +960,17 @@ export class AppService {
     }
   }
 
+  private updateSourceDiagnostic(sourceId: string, message: string): void {
+    const monitor = this.sourceMonitors[sourceId];
+    if (!monitor) {
+      return;
+    }
+
+    monitor.whisperLastError = message;
+    monitor.lastUpdatedAt = nowIso();
+    this.syncMonitorToSession(sourceId);
+  }
+
   private async queueNativeSegmentTranscription(
     source: CaptureSourceDescriptor,
     audioPath: string,
@@ -1010,8 +993,15 @@ export class AppService {
       this.activeSession.recordedAudioPaths[source.id] = sourcePaths;
       this.activeSession.recordedAudioPath = audioPath;
 
+      const signal = await analyzeWaveSignal(audioPath);
       const text = (await transcribeFile(audioPath)).replace(/\s+/g, " ").trim();
       if (!text) {
+        const diagnostic = signal?.silent
+          ? "Silent audio segment captured. Check the routed audio source or system-audio permissions."
+          : signal
+            ? "Audio segment contained signal, but no speech was detected."
+            : "Audio segment produced no transcript.";
+        this.updateSourceDiagnostic(source.id, diagnostic);
         await this.writeSessionArtifacts();
         return;
       }
@@ -1405,13 +1395,16 @@ function buildDiagnostics(source: CaptureSourceDescriptor, provider: string): st
   ];
 
   if (source.kind === "system-mix") {
-    diagnostics.push("Desktop Audio captures system audio across all available displays.");
+    diagnostics.push("Desktop Audio expects a routed loopback input such as BlackHole.");
   }
   if (provider === "whisper" && source.inputDeviceId) {
     diagnostics.push(`Whisper capture id: ${source.inputDeviceId}`);
   }
   if (source.bundleId) {
     diagnostics.push(`Bundle id: ${source.bundleId}`);
+  }
+  if (source.available === false && source.availabilityReason) {
+    diagnostics.push(`Unavailable: ${source.availabilityReason}`);
   }
   if (source.details) {
     diagnostics.push(source.details);

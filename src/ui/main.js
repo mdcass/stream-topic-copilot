@@ -565,7 +565,7 @@ function renderGroupedCaptureSelect(catalog, selectedSources) {
   const select = byId("capture-sources");
   const selectedIds = new Set((selectedSources || []).map((source) => source.id));
   const optionsSignature = (catalog || [])
-    .map((source) => `${source.groupLabel}::${source.id}::${source.kind}::${source.name}`)
+    .map((source) => `${source.groupLabel}::${source.id}::${source.kind}::${source.name}::${source.available !== false}::${source.availabilityReason || ""}`)
     .join("|");
   const selectedSignature = Array.from(selectedIds).sort().join("|");
   const groups = new Map();
@@ -587,7 +587,13 @@ function renderGroupedCaptureSelect(catalog, selectedSources) {
         const option = document.createElement("option");
         option.value = source.id;
         option.selected = selectedIds.has(source.id);
-        option.textContent = source.name;
+        option.disabled = source.available === false && !selectedIds.has(source.id);
+        option.textContent = source.available === false && source.availabilityReason
+          ? `${source.name} (Unavailable)`
+          : source.name;
+        option.title = source.available === false && source.availabilityReason
+          ? source.availabilityReason
+          : source.details || "";
         group.appendChild(option);
       });
       select.appendChild(group);
@@ -760,15 +766,15 @@ function permissionStateLabel(value) {
 
 function getPermissionRequirements(config, permissions) {
   const selectedSources = config?.captureSources || [];
-  const needsMicrophone = selectedSources.some((source) => source.kind === "microphone" || source.kind === "loopback-input");
-  const needsSystemAudio = selectedSources.some((source) => source.kind === "system-mix" || source.kind === "native-display-audio" || source.kind === "native-app-audio");
+  const needsMicrophone = selectedSources.some((source) => source.kind === "microphone" || source.kind === "loopback-input" || source.kind === "system-mix");
+  const needsSystemAudio = selectedSources.some((source) => source.kind === "native-display-audio" || source.kind === "native-app-audio");
   const issues = [];
 
   if (needsMicrophone && permissions.microphone !== "granted") {
-    issues.push(`Input access is ${permissionStateLabel(permissions.microphone)} for the selected microphone sources.`);
+    issues.push(`Input access is ${permissionStateLabel(permissions.microphone)} for the selected microphone or desktop-audio sources.`);
   }
   if (needsSystemAudio && permissions.systemAudio !== "granted") {
-    issues.push(`Screen/system-audio access is ${permissionStateLabel(permissions.systemAudio)} for the selected desktop-audio or advanced display/app sources.`);
+    issues.push(`Screen/system-audio access is ${permissionStateLabel(permissions.systemAudio)} for the selected advanced display/app sources.`);
   }
 
   return {

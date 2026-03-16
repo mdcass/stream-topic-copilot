@@ -23,16 +23,19 @@ cd stream-topic-copilot
 bash scripts/install.sh
 ```
 
-`install.sh` does eight things:
+`install.sh` does eleven things:
 
 1. installs npm dependencies
 2. creates `.env` from `.env.example` if needed
 3. installs `whisper-cpp` with Homebrew when it is available
-4. downloads a Whisper model locally and updates `.env` to use the Whisper provider
-5. compiles an SDL-based audio-device helper so the app can use Whisper-compatible capture IDs
-6. compiles a native mic activity probe helper for the Config view diagnostics
-7. compiles `scripts/request-microphone-permission.swift` into `.bin/request-microphone-permission`
-8. invokes the permission helper once so macOS can grant microphone access
+4. installs `blackhole-2ch` with Homebrew
+5. downloads a Whisper model locally and updates `.env` to use the Whisper provider
+6. compiles an SDL-based audio-device helper so the app can use Whisper-compatible capture IDs
+7. compiles a native mic activity probe helper for the Config view diagnostics
+8. compiles `scripts/request-microphone-permission.swift` into `.bin/request-microphone-permission`
+9. compiles the future-facing native system-audio helper
+10. invokes the permission helper once so macOS can grant microphone access
+11. runs the audio doctor, auto-selects the recommended routed desktop-audio source, and prints routing guidance if signal is missing
 
 The installer prints numbered progress steps while it runs.
 
@@ -60,8 +63,11 @@ Notes:
 - Models are downloaded into `.models/whisper.cpp/` inside the repo and ignored by git.
 - `install.sh` sets `STT_EXECUTABLE` automatically from the Homebrew `whisper-cpp` install.
 - The app now enumerates Whisper devices through an SDL helper so the selected capture ID matches what `whisper-stream` expects.
+- Desktop Audio now means a routed input device such as BlackHole, not ScreenCaptureKit display capture.
+- `install.sh` tries to detect BlackHole, writes the recommended `system-mix` source into config, and suggests Audio MIDI Setup steps if signal is still missing.
 - The Config view includes a separate native microphone activity probe and device diagnostics.
 - The current `WhisperCppProvider` expects a streaming-compatible binary such as `whisper-stream` that emits transcript lines to stdout.
+- Native display/app audio remains future-facing and is disabled by default until a signed helper identity exists.
 - If microphone permission was denied previously, rerun `./.bin/request-microphone-permission request` after fixing macOS privacy settings.
 
 ### Manual Whisper.cpp build fallback
@@ -102,6 +108,7 @@ The provider uses `codex exec` with the machine-readable schema at [docs/scoping
 
 ```bash
 npm run dev
+npm run doctor:audio
 npm run build
 npm run start
 npm run typecheck
@@ -132,6 +139,9 @@ Important variables:
 - `CHUNK_WORD_THRESHOLD`, `CHUNK_TIME_THRESHOLD_SECONDS`: raw chunk detection overrides
 - `CHUNK_SENSITIVITY`: `low`, `medium`, or `high`
 - `MIC_PERMISSION_HELPER`: compiled Swift helper path
+- `MIC_PROBE_HELPER`, `SDL_AUDIO_DEVICES_HELPER`: compiled local audio helper paths
+- `NATIVE_SYSTEM_AUDIO_HELPER`: native ScreenCaptureKit helper path
+- `ENABLE_NATIVE_SYSTEM_AUDIO_CAPTURE`: leave `false` until a signed helper identity exists
 
 ### Default developer mode
 
@@ -215,6 +225,7 @@ If the source markdown changed since the session started, the UI shows a warning
 ### Debugging failures
 
 - If the UI shows a microphone permission issue, run `./.bin/request-microphone-permission status`.
+- To validate Desktop Audio routing, run `npm run doctor:audio` while system audio is playing.
 - If Whisper fails to start, verify `STT_EXECUTABLE` and `WHISPER_MODEL`.
 - If Codex analysis fails, verify `codex exec --help` works locally and that you are logged in.
 - For postmortem review, inspect the JSONL files under the relevant session directory.
@@ -225,6 +236,7 @@ If the source markdown changed since the session started, the UI shows a warning
 npm run typecheck
 npm test
 npm run build
+npm run doctor:audio
 ```
 
-The current suite covers markdown parsing, proposed markdown generation, and an end-to-end mock-backed session/API flow.
+The current suite covers markdown parsing, proposed markdown generation, the audio doctor workflow, and end-to-end session/API flows for mock, routed desktop audio, and native-audio diagnostics.

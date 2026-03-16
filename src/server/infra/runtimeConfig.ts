@@ -47,6 +47,22 @@ function parseSensitivity(value: string | undefined): ChunkSensitivity {
   return "medium";
 }
 
+function parseBoolean(value: string | undefined, fallback: boolean): boolean {
+  if (value === undefined) {
+    return fallback;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(normalized)) {
+    return true;
+  }
+  if (["0", "false", "no", "off"].includes(normalized)) {
+    return false;
+  }
+
+  return fallback;
+}
+
 export function loadRuntimeConfig(): RuntimeConfig {
   return {
     rootDir: projectRoot,
@@ -72,7 +88,9 @@ export function loadRuntimeConfig(): RuntimeConfig {
     visibleSuggestionCount: parseNumber(process.env.VISIBLE_SUGGESTION_COUNT, 3),
     microphonePermissionHelper: resolveFromRoot(process.env.MIC_PERMISSION_HELPER, "./.bin/request-microphone-permission"),
     microphoneProbeHelper: resolveFromRoot(process.env.MIC_PROBE_HELPER, "./.bin/mic-level-probe"),
+    sdlAudioDevicesHelper: resolveFromRoot(process.env.SDL_AUDIO_DEVICES_HELPER, "./.bin/sdl-audio-devices"),
     nativeSystemAudioHelper: resolveFromRoot(process.env.NATIVE_SYSTEM_AUDIO_HELPER, "./.bin/native-system-audio-helper"),
+    enableNativeSystemAudioCapture: parseBoolean(process.env.ENABLE_NATIVE_SYSTEM_AUDIO_CAPTURE, false),
     analysisSchemaPath: resolveFromRoot(undefined, "./docs/scoping/codex-analysis-response-schema.json")
   };
 }

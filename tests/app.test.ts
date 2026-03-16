@@ -60,7 +60,9 @@ async function createRuntimeConfig(): Promise<RuntimeConfig> {
     visibleSuggestionCount: 3,
     microphonePermissionHelper: path.join(rootDir, ".bin/request-microphone-permission"),
     microphoneProbeHelper: path.join(rootDir, ".bin/mic-level-probe"),
+    sdlAudioDevicesHelper: path.join(rootDir, ".bin/sdl-audio-devices"),
     nativeSystemAudioHelper: path.join(rootDir, ".bin/native-system-audio-helper"),
+    enableNativeSystemAudioCapture: false,
     analysisSchemaPath: path.resolve("docs/scoping/codex-analysis-response-schema.json")
   };
 }
@@ -174,6 +176,7 @@ describe("app session flow", () => {
   it("preserves native selections and reports permission errors when system audio discovery is denied", async () => {
     const runtimeConfig = await createRuntimeConfig();
     runtimeConfig.sttProvider = "whisper";
+    runtimeConfig.enableNativeSystemAudioCapture = true;
     const whisperProvider = new FakeWhisperProvider();
 
     await writeFakeNativeHelper(
@@ -228,6 +231,7 @@ esac
   it("ends a session even if the native capture helper ignores SIGTERM", async () => {
     const runtimeConfig = await createRuntimeConfig();
     runtimeConfig.sttProvider = "whisper";
+    runtimeConfig.enableNativeSystemAudioCapture = true;
     const whisperProvider = new FakeWhisperProvider();
 
     await writeFakeNativeHelper(
@@ -289,10 +293,14 @@ esac
     expect(endResponse.body.session.status).toBe("finished");
   });
 
-  it("starts desktop-audio system-mix capture through native display audio", async () => {
+  it("starts desktop-audio system-mix capture through the whisper input-device path", async () => {
     const runtimeConfig = await createRuntimeConfig();
     runtimeConfig.sttProvider = "whisper";
-    const whisperProvider = new FakeWhisperProvider();
+    const whisperProvider = new FakeWhisperProvider([{
+      id: "BlackHole 2ch",
+      kind: "system-mix",
+      name: "BlackHole 2ch"
+    }]);
 
     await writeFakeNativeHelper(
       runtimeConfig,
@@ -300,13 +308,7 @@ esac
 set -eu
 case "$1" in
   status)
-    echo granted
-    ;;
-  request)
-    echo granted
-    ;;
-  list)
-    printf '%s\n' '{"displays":[{"id":"100","name":"Studio Display","displayId":"100","isDefault":true},{"id":"200","name":"Sidecar Display","displayId":"200","isDefault":false}],"applications":[]}'
+    echo denied
     ;;
   capture)
     trap 'exit 0' TERM
@@ -335,9 +337,9 @@ esac
       .send({
         sttProvider: "whisper",
         captureSources: [{
-          id: "system-mix:default",
+          id: "BlackHole 2ch",
           kind: "system-mix",
-          name: "Desktop Audio"
+          name: "BlackHole 2ch"
         }]
       })
       .expect(200);
@@ -346,24 +348,24 @@ esac
     expect(stateResponse.body.captureSourceCatalog).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
-          id: "system-mix:default",
+          id: "BlackHole 2ch",
           kind: "system-mix",
-          name: "Desktop Audio",
+          name: "BlackHole 2ch",
           groupLabel: "Desktop Audio"
         })
       ])
     );
-    expect(stateResponse.body.sourceMonitors["system-mix:default"].error).toBeNull();
-    expect(stateResponse.body.capturePermissions.systemAudio).toBe("granted");
+    expect(stateResponse.body.sourceMonitors["BlackHole 2ch"].error).toBeNull();
+    expect(stateResponse.body.capturePermissions.systemAudio).toBe("denied");
 
     const sessionResponse = await request(app).post("/api/session/start").expect(200);
     expect(sessionResponse.body.session.captureSources).toEqual([{
-      id: "system-mix:default",
+      id: "BlackHole 2ch",
       kind: "system-mix",
-      name: "Desktop Audio"
+      name: "BlackHole 2ch"
     }]);
-    expect(sessionResponse.body.session.sourceMonitors["system-mix:default"].status).toBe("running");
-    expect(whisperProvider.startCalls).toBe(0);
+    expect(sessionResponse.body.session.sourceMonitors["BlackHole 2ch"].status).toBe("running");
+    expect(whisperProvider.startCalls).toBe(1);
 
     await request(app)
       .post("/api/session/end")
@@ -371,7 +373,7 @@ esac
       .expect(200);
   });
 
-  it("keeps desktop audio running when one display capture errors but others remain active", async () => {
+  it("marks native app audio as unavailable when signed native capture is disabled", async () => {
     const runtimeConfig = await createRuntimeConfig();
     runtimeConfig.sttProvider = "whisper";
     const whisperProvider = new FakeWhisperProvider();
@@ -388,26 +390,7 @@ case "$1" in
     echo granted
     ;;
   list)
-    printf '%s\n' '{"displays":[{"id":"100","name":"Primary Display","displayId":"100","isDefault":true},{"id":"200","name":"Secondary Display","displayId":"200","isDefault":false}],"applications":[]}'
-    ;;
-  capture)
-    target=""
-    while [ "$#" -gt 0 ]; do
-      if [ "$1" = "--target-id" ]; then
-        shift
-        target="$1"
-      fi
-      shift || true
-    done
-    if [ "$target" = "100" ]; then
-      printf '%s\n' '{"type":"error","message":"Failed during stream due to application connection being interrupted"}'
-      sleep 2
-      exit 0
-    fi
-    trap 'exit 0' TERM
-    while true; do
-      sleep 5
-    done
+    printf '%s\n' '{"displays":[{"id":"100","name":"Primary Display","displayId":"100","isDefault":true}],"applications":[{"id":"456","name":"Discord","bundleId":"com.discord.Discord"}]}'
     ;;
   *)
     echo "unsupported" >&2
@@ -430,9 +413,85 @@ esac
       .send({
         sttProvider: "whisper",
         captureSources: [{
-          id: "system-mix:default",
-          kind: "system-mix",
-          name: "Desktop Audio"
+          id: "app-bundle:com.discord.Discord",
+          kind: "native-app-audio",
+          name: "Discord"
+        }]
+      })
+      .expect(200);
+
+    const stateResponse = await request(app).get("/api/state").expect(200);
+    const source = stateResponse.body.captureSourceCatalog.find((entry: { id: string; }) => entry.id === "app-bundle:com.discord.Discord");
+    expect(source.available).toBe(false);
+    expect(source.availabilityReason).toContain("signed helper identity");
+    expect(stateResponse.body.sourceMonitors["app-bundle:com.discord.Discord"].status).toBe("unsupported");
+    expect(stateResponse.body.sourceMonitors["app-bundle:com.discord.Discord"].error).toContain("signed helper identity");
+
+    const sessionResponse = await request(app).post("/api/session/start").expect(200);
+    expect(sessionResponse.body.session.sourceMonitors["app-bundle:com.discord.Discord"].status).toBe("unsupported");
+    expect(whisperProvider.startCalls).toBe(0);
+  });
+
+  it("surfaces a silent-segment diagnostic instead of silently dropping native audio", async () => {
+    const runtimeConfig = await createRuntimeConfig();
+    runtimeConfig.sttProvider = "whisper";
+    runtimeConfig.enableNativeSystemAudioCapture = true;
+    const whisperProvider = new FakeWhisperProvider();
+    const silentSegmentPath = path.join(runtimeConfig.rootDir, "silent.wav");
+    await fs.writeFile(
+      silentSegmentPath,
+      Buffer.from([
+        0x52, 0x49, 0x46, 0x46, 0x28, 0x00, 0x00, 0x00,
+        0x57, 0x41, 0x56, 0x45, 0x66, 0x6d, 0x74, 0x20,
+        0x10, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00,
+        0x80, 0x3e, 0x00, 0x00, 0x00, 0x7d, 0x00, 0x00,
+        0x02, 0x00, 0x10, 0x00, 0x64, 0x61, 0x74, 0x61,
+        0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+      ])
+    );
+
+    await writeFakeNativeHelper(
+      runtimeConfig,
+      `#!/bin/sh
+set -eu
+case "$1" in
+  status)
+    echo granted
+    ;;
+  request)
+    echo granted
+    ;;
+  list)
+    printf '%s\n' '{"displays":[{"id":"100","name":"Studio Display","displayId":"100","isDefault":true}],"applications":[]}'
+    ;;
+  capture)
+    printf '%s\n' '{"type":"segment","path":"${silentSegmentPath}","startedAt":"2026-03-16T10:00:00.000Z","endedAt":"2026-03-16T10:00:05.000Z"}'
+    sleep 1
+    ;;
+  *)
+    echo "unsupported" >&2
+    exit 1
+    ;;
+esac
+`
+    );
+
+    const service = new AppService(
+      runtimeConfig,
+      new Map([["whisper", whisperProvider]]),
+      new Map([["mock", new MockAnalysisProvider()]])
+    );
+    await service.initialize();
+    const app = createApp(service, runtimeConfig.publicDir, runtimeConfig.sessionsDir, process.cwd());
+
+    await request(app)
+      .post("/api/config")
+      .send({
+        sttProvider: "whisper",
+        captureSources: [{
+          id: "display:100",
+          kind: "native-display-audio",
+          name: "Studio Display"
         }]
       })
       .expect(200);
@@ -441,9 +500,7 @@ esac
     await delay(150);
 
     const stateResponse = await request(app).get("/api/state").expect(200);
-    expect(stateResponse.body.sourceMonitors["system-mix:default"].status).toBe("running");
-    expect(stateResponse.body.sourceMonitors["system-mix:default"].error).toBeNull();
-    expect(stateResponse.body.sourceMonitors["system-mix:default"].whisperLastError).toContain("application connection being interrupted");
+    expect(stateResponse.body.sourceMonitors["display:100"].whisperLastError).toContain("Silent audio segment captured");
 
     await request(app)
       .post("/api/session/end")

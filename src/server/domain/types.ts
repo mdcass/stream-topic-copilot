@@ -71,7 +71,9 @@ export interface RuntimeConfig {
   visibleSuggestionCount: number;
   microphonePermissionHelper: string;
   microphoneProbeHelper: string;
+  sdlAudioDevicesHelper: string;
   nativeSystemAudioHelper: string;
+  enableNativeSystemAudioCapture: boolean;
   analysisSchemaPath: string;
 }
 
@@ -81,6 +83,8 @@ export interface CaptureSourceDescriptor {
   kind: CaptureSourceKind;
   groupLabel: string;
   transport: CaptureSourceTransport;
+  available?: boolean;
+  availabilityReason?: string;
   manufacturer?: string;
   isDefault: boolean;
   inputDeviceId?: string;

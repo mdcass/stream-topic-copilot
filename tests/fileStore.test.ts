@@ -41,7 +41,9 @@ async function createRuntimeConfig(): Promise<RuntimeConfig> {
     visibleSuggestionCount: 3,
     microphonePermissionHelper: path.join(rootDir, ".bin/request-microphone-permission"),
     microphoneProbeHelper: path.join(rootDir, ".bin/mic-level-probe"),
+    sdlAudioDevicesHelper: path.join(rootDir, ".bin/sdl-audio-devices"),
     nativeSystemAudioHelper: path.join(rootDir, ".bin/native-system-audio-helper"),
+    enableNativeSystemAudioCapture: false,
     analysisSchemaPath: path.resolve("docs/scoping/codex-analysis-response-schema.json")
   };
 }

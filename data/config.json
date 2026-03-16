@@ -2,9 +2,9 @@
   "markdownFilePath": "/Users/mike/Projects/stream-topic-copilot/data/sample-topics.md",
   "captureSources": [
     {
-      "id": "system-mix:default",
+      "id": "3",
       "kind": "system-mix",
-      "name": "Desktop Audio"
+      "name": "BlackHole 2ch"
     }
   ],
   "sttProvider": "whisper",

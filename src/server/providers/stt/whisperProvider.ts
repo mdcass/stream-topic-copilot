@@ -3,6 +3,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 
 import type { CaptureSourceDescriptor, RuntimeConfig, TranscriptEvent } from "../../domain/types.js";
+import { classifyInputSource, groupLabelForInputSource } from "../../infra/inputSourceCatalog.js";
 import type { StartSttOptions, SttProvider, SttProviderHandlers, SttProviderSession } from "./providerTypes.js";
 
 const execFileAsync = promisify(execFile);
@@ -24,8 +25,7 @@ export class WhisperCppProvider implements SttProvider {
     }
 
     try {
-      const helperPath = `${this.runtimeConfig.rootDir}/.bin/sdl-audio-devices`;
-      const { stdout } = await execFileAsync(helperPath, []);
+      const { stdout } = await execFileAsync(this.runtimeConfig.sdlAudioDevicesHelper, []);
       const parsed = JSON.parse(stdout) as Array<{ id: string; name: string; isDefault: boolean; }>;
       this.cachedSources = parsed.map((device) => ({
         id: device.id,
@@ -172,15 +172,4 @@ export class WhisperCppProvider implements SttProvider {
 
     return path.join(path.dirname(this.runtimeConfig.sttExecutable), "whisper-cli");
   }
-}
-
-function classifyInputSource(name: string): "microphone" | "system-mix" {
-  const normalized = name.toLowerCase();
-  return /(blackhole|loopback|zoomaudio|obs|vb[- ]?audio|soundflower)/.test(normalized)
-    ? "system-mix"
-    : "microphone";
-}
-
-function groupLabelForInputSource(kind: ReturnType<typeof classifyInputSource>): string {
-  return kind === "system-mix" ? "Desktop Audio" : "Microphones";
 }
