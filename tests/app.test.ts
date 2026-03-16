@@ -87,6 +87,7 @@ describe("app session flow", () => {
 
     const stateResponse = await request(app).get("/api/state").expect(200);
     expect(stateResponse.body.activeSession.latestTranscriptTail).toHaveLength(1);
+    expect(stateResponse.body.activeSession.visibleTranscriptEvents).toHaveLength(1);
     expect(stateResponse.body.activeSession.analyses.length).toBeGreaterThanOrEqual(1);
 
     const sessionId = stateResponse.body.activeSession.id;
@@ -100,5 +101,23 @@ describe("app session flow", () => {
     const finalState = await request(app).get("/api/state").expect(200);
     expect(finalState.body.activeSession).toBeNull();
     expect(await fs.readFile(path.join(sessionDir, "transcript.approx.srt"), "utf8")).toContain("00:00:00,");
+  });
+
+  it("returns a clear error when UI assets are missing", async () => {
+    const runtimeConfig = await createRuntimeConfig();
+    const service = new AppService(
+      runtimeConfig,
+      new Map([["mock", new MockSttProvider()]]),
+      new Map([["mock", new MockAnalysisProvider()]])
+    );
+    await service.initialize();
+
+    const missingPublicDir = path.join(runtimeConfig.rootDir, "dist/ui");
+    const app = createApp(service, missingPublicDir, runtimeConfig.sessionsDir, runtimeConfig.rootDir);
+
+    const response = await request(app).get("/").expect(503);
+    expect(response.text).toContain("UI assets not found");
+    expect(response.text).toContain("http://127.0.0.1:5173");
+    expect(response.text).toContain("npm run build");
   });
 });

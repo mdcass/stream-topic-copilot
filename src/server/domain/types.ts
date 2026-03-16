@@ -185,6 +185,7 @@ export interface SessionSnapshot {
   microphoneSelection: string | null;
   status: SessionStatus;
   latestTranscriptTail: TranscriptEvent[];
+  visibleTranscriptEvents: TranscriptEvent[];
   latestAnalysisAt: string | null;
   proposedMarkdownPath: string;
   liveTranscriptPath: string | null;

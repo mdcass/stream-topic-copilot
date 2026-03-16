@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import express from "express";
 import path from "node:path";
 
@@ -5,6 +6,7 @@ import type { AppService } from "./appService.js";
 
 export function createApp(service: AppService, publicDir: string, sessionsDir: string, rootDir: string) {
   const app = express();
+  const indexPath = path.join(publicDir, "index.html");
 
   app.use(express.json());
   app.use("/artifacts", express.static(sessionsDir));
@@ -83,7 +85,18 @@ export function createApp(service: AppService, publicDir: string, sessionsDir: s
   });
 
   app.get("*", (_request, response) => {
-    response.sendFile(path.join(publicDir, "index.html"));
+    if (fs.existsSync(indexPath)) {
+      response.sendFile(indexPath);
+      return;
+    }
+
+    response.status(503).type("text/plain").send(
+      [
+        `UI assets not found at ${indexPath}.`,
+        "For development, open http://127.0.0.1:5173 after running `npm run dev`.",
+        `For the server-only URL on http://127.0.0.1:4312, build the UI first with \`npm run build\` or set PUBLIC_DIR to a built UI directory in ${path.join(rootDir, ".env")}.`
+      ].join("\n")
+    );
   });
 
   return app;

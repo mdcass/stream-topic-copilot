@@ -12,8 +12,16 @@ const state = {
   pollingIntervalMs: 2000,
   data: null,
   configDraft: null,
-  configDirty: false
+  configDirty: false,
+  expandedTopics: new Set(),
+  currentError: null,
+  transcriptRender: {
+    keys: new Set(),
+    textByKey: new Map()
+  }
 };
+
+const topicStates = ["pending", "partial", "covered", "snoozed", "dismissed"];
 
 const byId = (id) => document.getElementById(id);
 
@@ -32,13 +40,19 @@ async function requestJson(url, options = {}) {
 }
 
 function showError(message) {
-  const banner = byId("error-banner");
-  banner.textContent = message;
-  banner.classList.remove("d-none");
+  state.currentError = message;
+  const pill = byId("error-pill");
+  pill.textContent = message;
+  pill.title = message;
+  pill.classList.remove("d-none");
 }
 
 function clearError() {
-  byId("error-banner").classList.add("d-none");
+  state.currentError = null;
+  const pill = byId("error-pill");
+  pill.classList.add("d-none");
+  pill.textContent = "";
+  pill.title = "";
 }
 
 function collectConfigFormValues() {
@@ -88,13 +102,34 @@ function highlightMarkdownLine(text) {
   return hljs.highlight(text, { language: "markdown" }).value;
 }
 
-function formatRelativeSrtTime(sessionStartedAt, isoTime) {
-  const relative = Math.max(0, new Date(isoTime).getTime() - new Date(sessionStartedAt).getTime());
+function formatRelativeFromNow(isoTime) {
+  const diffSeconds = Math.round((Date.parse(isoTime) - Date.now()) / 1000);
+  const absoluteSeconds = Math.abs(diffSeconds);
+  const rtf = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
+
+  if (absoluteSeconds < 45) {
+    return rtf.format(Math.round(diffSeconds), "second");
+  }
+  if (absoluteSeconds < 3600) {
+    return rtf.format(Math.round(diffSeconds / 60), "minute");
+  }
+  if (absoluteSeconds < 86400) {
+    return rtf.format(Math.round(diffSeconds / 3600), "hour");
+  }
+  return rtf.format(Math.round(diffSeconds / 86400), "day");
+}
+
+function formatSessionOffset(sessionStartedAt, isoTime) {
+  const relative = Math.max(0, Date.parse(isoTime) - Date.parse(sessionStartedAt));
   const hours = Math.floor(relative / 3600000);
   const minutes = Math.floor((relative % 3600000) / 60000);
   const seconds = Math.floor((relative % 60000) / 1000);
-  const milliseconds = relative % 1000;
-  return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")},${String(milliseconds).padStart(3, "0")}`;
+
+  if (hours > 0) {
+    return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+  }
+
+  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
 }
 
 function topicMarker(topic) {
@@ -125,12 +160,18 @@ function appendMarkdownRow(container, text, options = {}) {
     toggle.type = "button";
     toggle.setAttribute("data-bs-toggle", "dropdown");
     toggle.setAttribute("aria-expanded", "false");
-    toggle.setAttribute("title", `Current state: ${options.topic.currentState}`);
+    toggle.setAttribute("title", [
+      `Current state: ${options.topic.currentState}`,
+      `Set by: ${options.topic.stateSetBy}`,
+      typeof options.topic.confidenceAtLastChange === "number"
+        ? `Confidence: ${Math.round(options.topic.confidenceAtLastChange * 100)}%`
+        : null
+    ].filter(Boolean).join(" | "));
     toggle.textContent = topicMarker(options.topic);
 
     const menu = document.createElement("ul");
     menu.className = "dropdown-menu dropdown-menu-sm";
-    ["pending", "partial", "covered", "snoozed", "dismissed"].forEach((nextState) => {
+    topicStates.forEach((nextState) => {
       const item = document.createElement("li");
       const button = document.createElement("button");
       button.className = "dropdown-item small";
@@ -151,8 +192,7 @@ function appendMarkdownRow(container, text, options = {}) {
       menu.appendChild(item);
     });
 
-    dropdownWrap.appendChild(toggle);
-    dropdownWrap.appendChild(menu);
+    dropdownWrap.append(toggle, menu);
     row.appendChild(dropdownWrap);
   }
 
@@ -163,6 +203,44 @@ function appendMarkdownRow(container, text, options = {}) {
   container.appendChild(row);
 }
 
+function appendTopicDetails(container, topicId, label, childTopics, session, suggestionIndex) {
+  const detailsWrap = document.createElement("div");
+  detailsWrap.className = "ps-5 mb-1";
+
+  const details = document.createElement("details");
+  details.className = "small";
+  details.open = state.expandedTopics.has(topicId);
+  details.addEventListener("toggle", () => {
+    if (details.open) {
+      state.expandedTopics.add(topicId);
+      return;
+    }
+
+    state.expandedTopics.delete(topicId);
+  });
+
+  const summary = document.createElement("summary");
+  summary.className = "text-body-secondary";
+  summary.textContent = label;
+  details.appendChild(summary);
+
+  const childContainer = document.createElement("div");
+  childContainer.className = "pt-1";
+
+  childTopics.forEach((childTopic) => {
+    appendMarkdownRow(childContainer, buildTopicLine(childTopic, suggestionIndex, true), { topic: childTopic });
+
+    const elaborationPrompts = suggestionIndex.elaborationByTopic.get(childTopic.id) || [];
+    elaborationPrompts.forEach((prompt) => {
+      appendMarkdownRow(childContainer, `    - 💬 ${prompt.text} (${Math.round(prompt.confidence * 100)}%)`);
+    });
+  });
+
+  details.appendChild(childContainer);
+  detailsWrap.appendChild(details);
+  container.appendChild(detailsWrap);
+}
+
 function sectionLines(title, lines) {
   return [
     `## ${title}`,
@@ -171,64 +249,330 @@ function sectionLines(title, lines) {
   ];
 }
 
-function buildLiveMarkdownRows(data) {
-  const session = data.activeSession;
-  if (!session) {
-    return [
-      { text: "## Session" },
-      { text: "- No active session" }
-    ];
-  }
+function buildSuggestionIndex(session) {
+  const activeByTopic = new Map();
+  const elaborationByTopic = new Map();
+  const floatingPrompts = [];
 
-  const sessionLines = [
-    `- Started: ${new Date(session.startedAt).toLocaleString()}`,
-    `- Status: ${session.status}`,
-    `- Session ID: ${session.id}`,
+  session.suggestions.activeTopics.forEach((prompt) => {
+    if (prompt.topicId && session.topics[prompt.topicId]) {
+      activeByTopic.set(prompt.topicId, prompt);
+      return;
+    }
+
+    floatingPrompts.push({ category: "Active", prompt });
+  });
+
+  session.suggestions.elaborationStarters.forEach((prompt) => {
+    if (prompt.topicId && session.topics[prompt.topicId]) {
+      const items = elaborationByTopic.get(prompt.topicId) || [];
+      items.push(prompt);
+      elaborationByTopic.set(prompt.topicId, items);
+      return;
+    }
+
+    floatingPrompts.push({ category: "Prompt", prompt });
+  });
+
+  return {
+    activeByTopic,
+    elaborationByTopic,
+    floatingPrompts
+  };
+}
+
+function buildTopicLine(topic, suggestionIndex, isChild = false) {
+  const activePrompt = suggestionIndex.activeByTopic.get(topic.id);
+  const prefix = isChild ? "  - " : "- ";
+  const focusText = activePrompt ? `  ⭐ ${Math.round(activePrompt.confidence * 100)}%` : "";
+  return `${prefix}${topic.text}${focusText}`;
+}
+
+function renderNoticeSection(container, session) {
+  const noticeLines = [
     session.lastError ? `- Error: ${session.lastError}` : null,
-    session.resumeWarning ? `- Resume warning: ${session.resumeWarning}` : null
+    session.resumeWarning ? `- Resume warning: ${session.resumeWarning}` : null,
+    ...session.warnings.map((warning) => {
+      const topicText = warning.topicId && session.topics[warning.topicId]
+        ? ` (${session.topics[warning.topicId].text})`
+        : "";
+      return `- ${warning.code}: ${warning.message}${topicText}`;
+    })
   ].filter(Boolean);
 
-  const suggestionLines = (items, titleField = "text") => items.map((item) => `- ${item[titleField]} (${Math.round(item.confidence * 100)}%)`);
-  const transcriptLines = session.chunks
-    .slice(-5)
-    .reverse()
-    .flatMap((chunk, index) => [
-      `${index + 1}`,
-      `${formatRelativeSrtTime(session.startedAt, chunk.startedAt)} --> ${formatRelativeSrtTime(session.startedAt, chunk.endedAt)}`,
-      chunk.text,
-      ""
-    ]);
+  sectionLines("Notices", noticeLines.length ? noticeLines : ["- None"]).forEach((text) => appendMarkdownRow(container, text));
+}
 
-  const rows = [
-    ...sectionLines("Session", sessionLines),
-    ...sectionLines("Active Topics", suggestionLines(session.suggestions.activeTopics)),
-    ...sectionLines("Elaboration Starters", suggestionLines(session.suggestions.elaborationStarters)),
-    ...sectionLines("Adjacent Next Topics", suggestionLines(session.suggestions.adjacentNextTopics)),
-    ...sectionLines("Recovery Prompts", suggestionLines(session.suggestions.recoveryPrompts)),
-    ...sectionLines("Off-topic Observations", suggestionLines(session.offTopicObservations, "label")),
-    ...sectionLines("Transcript", transcriptLines.length ? transcriptLines : ["- No transcript captured yet."]),
-    "## Topic State"
-  ].map((text) => ({ text }));
+function renderTalkingPointsSection(container, session, suggestionIndex) {
+  appendMarkdownRow(container, "## Talking Points");
 
-  Object.values(session.topics)
-    .sort((left, right) => left.originalOrder - right.originalOrder)
-    .forEach((topic) => {
-      rows.push({
-        text: `${topic.section}: ${topic.text}`,
-        topic
+  session.document.sections.forEach((section) => {
+    appendMarkdownRow(container, `### ${section.heading}`);
+
+    let sectionHasContent = false;
+
+    section.blocks.forEach((block) => {
+      if (block.kind === "raw") {
+        const rawLine = block.line.trim();
+        if (!rawLine) {
+          return;
+        }
+        appendMarkdownRow(container, rawLine);
+        sectionHasContent = true;
+        return;
+      }
+
+      const topic = session.topics[block.topicId];
+      if (!topic || topic.parentId) {
+        return;
+      }
+
+      appendMarkdownRow(container, buildTopicLine(topic, suggestionIndex), { topic });
+      sectionHasContent = true;
+
+      const elaborationPrompts = suggestionIndex.elaborationByTopic.get(topic.id) || [];
+      elaborationPrompts.forEach((prompt) => {
+        appendMarkdownRow(container, `  - 💬 ${prompt.text} (${Math.round(prompt.confidence * 100)}%)`);
       });
+
+      const childTopics = topic.children
+        .map((childId) => session.topics[childId])
+        .filter(Boolean);
+
+      if (childTopics.length) {
+        appendTopicDetails(container, topic.id, `Show beats (${childTopics.length})`, childTopics, session, suggestionIndex);
+      }
     });
 
-  return rows;
+    if (!sectionHasContent) {
+      appendMarkdownRow(container, "- None");
+    }
+
+    appendMarkdownRow(container, "");
+  });
+}
+
+function renderSuggestionSection(container, title, items, emptyMessage) {
+  const lines = items.length ? items : [emptyMessage];
+  sectionLines(title, lines).forEach((text) => appendMarkdownRow(container, text));
+}
+
+function isSuppressedTranscriptEvent(text) {
+  const normalized = text.trim().toLowerCase();
+  return normalized === "[blank_audio]" || normalized === "[typing]" || normalized === "(typing)" || normalized === "[start speaking]";
+}
+
+function buildTranscriptManuscript(session) {
+  const transcriptSource = session.visibleTranscriptEvents?.length
+    ? session.visibleTranscriptEvents
+    : session.latestTranscriptTail;
+  const lines = [];
+
+  transcriptSource.forEach((event) => {
+    const suppressed = isSuppressedTranscriptEvent(event.text);
+
+    if (event.replaceLast && lines.length > 0) {
+      if (suppressed) {
+        lines.pop();
+        return;
+      }
+
+      lines[lines.length - 1] = {
+        text: event.text,
+        timestamp: event.timestamp
+      };
+      return;
+    }
+
+    if (suppressed) {
+      return;
+    }
+
+    lines.push({
+      text: event.text,
+      timestamp: event.timestamp
+    });
+  });
+
+  return lines.map((line, index) => ({
+    key: `line-${index}`,
+    ...line
+  }));
+}
+
+function animateTranscriptRow(row, mode = "insert") {
+  if (!row.animate) {
+    return;
+  }
+
+  const keyframes = mode === "rewrite"
+    ? [
+      {
+        opacity: 0.35,
+        filter: "blur(3px)",
+        clipPath: "inset(0 100% 0 0)"
+      },
+      {
+        opacity: 1,
+        filter: "blur(0)",
+        clipPath: "inset(0 0 0 0)"
+      }
+    ]
+    : [
+      {
+        opacity: 0,
+        filter: "blur(3px)",
+        clipPath: "inset(0 100% 0 0)",
+        transform: "translateY(4px)"
+      },
+      {
+        opacity: 1,
+        filter: "blur(0)",
+        clipPath: "inset(0 0 0 0)",
+        transform: "translateY(0)"
+      }
+    ];
+
+  row.animate(keyframes, {
+    duration: mode === "rewrite" ? 240 : 220,
+    easing: "ease-out"
+  });
+}
+
+function createTranscriptRow(line, session) {
+  const row = document.createElement("div");
+  row.className = [
+    "d-flex",
+    "gap-2",
+    "align-items-start",
+    "py-1"
+  ].filter(Boolean).join(" ");
+
+  const time = document.createElement("div");
+  time.className = "text-body-secondary flex-shrink-0";
+  time.style.minWidth = "4.5rem";
+  time.textContent = formatSessionOffset(session.startedAt, line.timestamp);
+
+  const text = document.createElement("div");
+  text.className = "text-body-emphasis";
+  text.style.whiteSpace = "pre-wrap";
+  text.textContent = line.text;
+
+  row.append(time, text);
+  return row;
+}
+
+function renderTranscriptPane(session) {
+  const container = byId("live-transcript-pane");
+  container.innerHTML = "";
+
+  const heading = document.createElement("div");
+  heading.className = "mb-2";
+  heading.innerHTML = highlightMarkdownLine("## Transcript");
+  container.appendChild(heading);
+
+  if (!session) {
+    const empty = document.createElement("div");
+    empty.className = "text-body-secondary";
+    empty.textContent = "No active session";
+    container.appendChild(empty);
+    state.transcriptRender = {
+      keys: new Set(),
+      textByKey: new Map()
+    };
+    container.scrollTop = container.scrollHeight;
+    return;
+  }
+
+  const transcriptLines = buildTranscriptManuscript(session);
+
+  if (!transcriptLines.length) {
+    const empty = document.createElement("div");
+    empty.className = "text-body-secondary";
+    empty.textContent = "No transcript captured yet.";
+    container.appendChild(empty);
+    state.transcriptRender = {
+      keys: new Set(),
+      textByKey: new Map()
+    };
+    container.scrollTop = container.scrollHeight;
+    return;
+  }
+
+  const previousKeys = state.transcriptRender.keys;
+
+  transcriptLines.forEach((line) => {
+    const row = createTranscriptRow(line, session);
+    container.appendChild(row);
+    if (!previousKeys.has(line.key)) {
+      animateTranscriptRow(row);
+      return;
+    }
+
+    const previousText = state.transcriptRender.textByKey.get(line.key);
+    if (previousText !== line.text) {
+      animateTranscriptRow(row, "rewrite");
+    }
+  });
+
+  state.transcriptRender = {
+    keys: new Set(transcriptLines.map((line) => line.key)),
+    textByKey: new Map(transcriptLines.map((line) => [line.key, line.text]))
+  };
+  container.scrollTop = container.scrollHeight;
 }
 
 function renderLiveMarkdown(data) {
   const container = byId("live-markdown-pane");
   container.innerHTML = "";
 
-  buildLiveMarkdownRows(data).forEach((row) => {
-    appendMarkdownRow(container, row.text, { topic: row.topic });
-  });
+  const session = data.activeSession;
+  if (!session) {
+    appendMarkdownRow(container, "## Live View");
+    appendMarkdownRow(container, "- No active session");
+    renderTranscriptPane(null);
+    return;
+  }
+
+  const suggestionIndex = buildSuggestionIndex(session);
+
+  renderNoticeSection(container, session);
+  renderTalkingPointsSection(container, session, suggestionIndex);
+
+  renderSuggestionSection(
+    container,
+    "Live Prompts",
+    suggestionIndex.floatingPrompts.map(({ category, prompt }) => `- ${category}: ${prompt.text} (${Math.round(prompt.confidence * 100)}%)`),
+    "- None"
+  );
+
+  renderSuggestionSection(
+    container,
+    "Next Up",
+    session.suggestions.adjacentNextTopics.map((prompt) => {
+      const relatedTopic = prompt.topicId && session.topics[prompt.topicId]
+        ? ` -> ${session.topics[prompt.topicId].text}`
+        : "";
+      return `- ${prompt.text}${relatedTopic} (${Math.round(prompt.confidence * 100)}%)`;
+    }),
+    "- None"
+  );
+
+  renderSuggestionSection(
+    container,
+    "Off-topic Observations",
+    session.offTopicObservations.map((item) => `- ${item.label} (${Math.round(item.confidence * 100)}%)`),
+    "- None"
+  );
+
+  renderSuggestionSection(
+    container,
+    "Recovery Prompts",
+    session.suggestions.recoveryPrompts.map((prompt) => `- ${prompt.text} (${Math.round(prompt.confidence * 100)}%)`),
+    "- None"
+  );
+
+  renderTranscriptPane(session);
 }
 
 function renderMicrophoneDiagnostics(monitor) {
@@ -317,6 +661,18 @@ function fillSelect(select, options, selectedValue) {
   }
 }
 
+function selectedMicrophoneName(data) {
+  if (data.microphoneMonitor?.selectedDeviceName) {
+    return data.microphoneMonitor.selectedDeviceName;
+  }
+
+  const selectedId = state.configDirty && state.configDraft
+    ? state.configDraft.microphoneId
+    : data.config.microphoneId;
+
+  return data.microphones.find((microphone) => microphone.id === selectedId)?.name || "No microphone selected";
+}
+
 function renderConfig(data) {
   const { config, runtime, microphones, microphonePermission, microphoneMonitor } = data;
   const effectiveConfig = state.configDirty && state.configDraft
@@ -330,7 +686,9 @@ function renderConfig(data) {
   byId("chunk-sensitivity").value = effectiveConfig.chunkSensitivity;
   byId("analysis-threshold").value = String(effectiveConfig.analysisAutoApplyThreshold);
   byId("analysis-threshold-label").textContent = `${Math.round(effectiveConfig.analysisAutoApplyThreshold * 100)}%`;
-  byId("permission-pill").textContent = `Mic: ${microphonePermission}`;
+  byId("permission-pill").textContent = `Mic: ${microphonePermission} ●`;
+  byId("permission-pill").className = `badge ${microphonePermission === "granted" ? "text-bg-light border text-success" : "text-bg-light border text-secondary"}`;
+  byId("permission-pill").title = selectedMicrophoneName(data);
   byId("mic-level-bar").style.width = `${Math.round((microphoneMonitor?.level ?? 0) * 100)}%`;
   byId("mic-level-bar").setAttribute("aria-valuenow", String(Math.round((microphoneMonitor?.level ?? 0) * 100)));
   byId("mic-level-meta").textContent = microphoneMonitor?.probeStatus === "running"
@@ -345,12 +703,16 @@ function renderLive(data) {
   const endButton = byId("end-session");
   const undoButton = byId("undo-action");
   const mockTranscriptButton = byId("send-mock-transcript");
+  const mockTranscriptCard = byId("mock-transcript-card");
   const permissionPill = byId("permission-pill");
   const sessionPill = byId("session-pill");
-  permissionPill.textContent = `Mic: ${data.microphonePermission}`;
-  permissionPill.className = `badge ${data.microphonePermission === "granted" ? "text-bg-success" : "text-bg-secondary"}`;
-  sessionPill.textContent = session ? `Active: ${session.id}` : "No active session";
-  sessionPill.className = `badge ${session ? "text-bg-primary" : "text-bg-secondary"}`;
+
+  permissionPill.textContent = `Mic: ${data.microphonePermission} ●`;
+  permissionPill.className = `badge ${data.microphonePermission === "granted" ? "text-bg-light border text-success" : "text-bg-light border text-secondary"}`;
+  permissionPill.title = selectedMicrophoneName(data);
+  sessionPill.textContent = session ? `Session: ${session.status} ●` : "No active session";
+  sessionPill.className = `badge ${session ? "text-bg-light border text-primary" : "text-bg-light border text-secondary"}`;
+  sessionPill.title = session ? session.id : "No active session";
 
   if (!session) {
     analyzeButton.classList.add("disabled");
@@ -364,6 +726,7 @@ function renderLive(data) {
     undoButton.setAttribute("aria-disabled", "true");
     undoButton.disabled = true;
     mockTranscriptButton.disabled = true;
+    mockTranscriptCard.classList.add("d-none");
     byId("session-meta").textContent = "No active session.";
     renderLiveMarkdown(data);
     return;
@@ -380,17 +743,17 @@ function renderLive(data) {
   undoButton.removeAttribute("aria-disabled");
   undoButton.disabled = false;
   mockTranscriptButton.disabled = false;
+  mockTranscriptCard.classList.toggle("d-none", session.sttProvider !== "mock");
   byId("session-meta").textContent = [
-    `Started ${new Date(session.startedAt).toLocaleString()}`,
+    `Started ${formatRelativeFromNow(session.startedAt)}`,
     `Status ${session.status}`,
-    session.lastError ? `Error: ${session.lastError}` : null,
-    session.resumeWarning
+    session.latestAnalysisAt ? `Last analysis ${formatRelativeFromNow(session.latestAnalysisAt)}` : null,
+    session.lastError ? "Error present" : null
   ].filter(Boolean).join(" · ");
   renderLiveMarkdown(data);
 }
 
 async function loadState() {
-  clearError();
   const data = await requestJson("/api/state");
   state.data = data;
   if (data.runtime?.pollingIntervalMs && data.runtime.pollingIntervalMs !== state.pollingIntervalMs) {
@@ -406,6 +769,7 @@ async function loadState() {
   renderLive(data);
   renderHistory(data.history, "history-list");
   renderHistory(data.resumableSessions, "resume-list", true);
+  clearError();
 }
 
 async function saveConfig(overrides = collectConfigFormValues()) {

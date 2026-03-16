@@ -33,6 +33,7 @@ function createSessionFromMarkdown(markdown: string): SessionSnapshot {
     microphoneSelection: null,
     status: "active",
     latestTranscriptTail: [],
+    visibleTranscriptEvents: [],
     latestAnalysisAt: null,
     proposedMarkdownPath: "/tmp/proposed-final.md",
     liveTranscriptPath: "/tmp/live-transcript.txt",

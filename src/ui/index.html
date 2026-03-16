@@ -16,13 +16,14 @@
               <button class="tab nav-link py-1 px-2 small" data-tab="live" type="button">Live</button>
               <button class="tab nav-link py-1 px-2 small" data-tab="history" type="button">History</button>
             </nav>
-            <div id="live-tab-status" class="d-none flex-wrap gap-2">
-              <span id="permission-pill" class="badge text-bg-secondary">Mic: unknown</span>
-              <span id="session-pill" class="badge text-bg-secondary">No active session</span>
+            <div class="d-flex flex-wrap gap-2">
+              <span id="error-pill" class="badge text-bg-danger d-none">Connection error</span>
+              <div id="live-tab-status" class="d-none flex-wrap gap-2">
+                <span id="permission-pill" class="badge text-bg-secondary">Mic: unknown</span>
+                <span id="session-pill" class="badge text-bg-secondary">No active session</span>
+              </div>
             </div>
           </div>
-
-          <section id="error-banner" class="alert alert-danger small py-2 px-3 d-none mb-3" role="alert"></section>
 
           <section id="tab-config" class="tab-panel">
             <div class="vstack gap-3">
@@ -100,11 +101,19 @@
                 <p id="session-meta" class="small text-body-secondary mb-0">No active session.</p>
               </div>
 
-              <div class="border rounded overflow-hidden">
-                <div id="live-markdown-pane" class="hljs small font-monospace p-3 mb-0"></div>
+              <div class="card">
+                <div class="card-body p-0">
+                  <div id="live-markdown-pane" class="hljs small font-monospace p-3 mb-0"></div>
+                </div>
               </div>
 
               <div class="card">
+                <div class="card-body p-0">
+                  <div id="live-transcript-pane" class="hljs small font-monospace p-3 mb-0 overflow-auto" style="max-height: 300px;"></div>
+                </div>
+              </div>
+
+              <div id="mock-transcript-card" class="card d-none">
                 <div class="card-body">
                   <h2 class="h6 card-title">Mock Transcript Input</h2>
                   <div class="mb-3">

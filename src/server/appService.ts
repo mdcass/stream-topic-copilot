@@ -211,6 +211,7 @@ export class AppService {
       microphoneSelection: this.config.microphoneId,
       status: "active",
       latestTranscriptTail: [],
+      visibleTranscriptEvents: [],
       latestAnalysisAt: null,
       proposedMarkdownPath: artifacts.proposedMarkdownPath,
       liveTranscriptPath: path.join(artifacts.sessionDir, "live-transcript.txt"),
@@ -254,6 +255,8 @@ export class AppService {
     if (loaded.status === "finished") {
       throw new Error("Finished sessions cannot be resumed.");
     }
+
+    loaded.visibleTranscriptEvents ??= [];
 
     const currentSourceExists = await this.fileStore.exists(loaded.sourceMarkdownPath);
     if (currentSourceExists) {
@@ -553,6 +556,8 @@ export class AppService {
     if (!this.activeSession) {
       return;
     }
+
+    this.activeSession.visibleTranscriptEvents.push({ ...event });
 
     if (event.replaceLast && this.activeSession.pendingTranscriptEvents.length > 0) {
       const lastPending = this.activeSession.pendingTranscriptEvents[this.activeSession.pendingTranscriptEvents.length - 1];

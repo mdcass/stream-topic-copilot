@@ -109,6 +109,7 @@ else
 fi
 
 progress "6/8" "Updating .env for Whisper provider"
+set_env "PUBLIC_DIR" "./dist/ui"
 set_env "STT_PROVIDER" "whisper"
 set_env "STT_EXECUTABLE" "$WHISPER_EXECUTABLE"
 set_env "WHISPER_MODEL" "$MODEL_PATH"

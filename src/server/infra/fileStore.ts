@@ -80,7 +80,9 @@ export class FileStore {
     try {
       const sessionPath = path.join(this.sessionDir(sessionId), "session.json");
       const content = await fs.readFile(sessionPath, "utf8");
-      return JSON.parse(content) as SessionSnapshot;
+      const session = JSON.parse(content) as SessionSnapshot;
+      session.visibleTranscriptEvents ??= [];
+      return session;
     } catch (error) {
       return null;
     }
