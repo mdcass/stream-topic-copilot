@@ -44,7 +44,7 @@ export function loadRuntimeConfig(): RuntimeConfig {
     port: parseNumber(process.env.PORT, 4312),
     dataDir: resolveFromRoot(process.env.DATA_DIR, "./data"),
     sessionsDir: resolveFromRoot(process.env.SESSIONS_DIR, "./sessions"),
-    publicDir: resolveFromRoot(process.env.PUBLIC_DIR, "./src/ui/public"),
+    publicDir: resolveFromRoot(process.env.PUBLIC_DIR, "./dist/ui"),
     configPath: resolveFromRoot(process.env.CONFIG_PATH, "./data/config.json"),
     analysisProvider: process.env.ANALYSIS_PROVIDER ?? "mock",
     sttProvider: process.env.STT_PROVIDER ?? "mock",

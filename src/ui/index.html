@@ -3,8 +3,8 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="icon" href="data:," />
     <title>Stream Topic Copilot</title>
-    <link rel="stylesheet" href="/vendor/bootstrap/css/bootstrap.min.css" />
   </head>
   <body class="bg-body-tertiary">
     <main class="container py-3">
@@ -100,13 +100,9 @@
                 <p id="session-meta" class="small text-body-secondary mb-0">No active session.</p>
               </div>
 
-              <div class="card"><div class="card-body"><h2 class="h6 card-title">Active Topics</h2><div id="active-topics" class="vstack gap-2 text-body-secondary small">No suggestions yet.</div></div></div>
-              <div class="card"><div class="card-body"><h2 class="h6 card-title">Elaboration Starters</h2><div id="elaboration-starters" class="vstack gap-2 text-body-secondary small">No suggestions yet.</div></div></div>
-              <div class="card"><div class="card-body"><h2 class="h6 card-title">Adjacent Next Topics</h2><div id="adjacent-topics" class="vstack gap-2 text-body-secondary small">No suggestions yet.</div></div></div>
-              <div class="card"><div class="card-body"><h2 class="h6 card-title">Recovery Prompts</h2><div id="recovery-prompts" class="vstack gap-2 text-body-secondary small">No suggestions yet.</div></div></div>
-              <div class="card"><div class="card-body"><h2 class="h6 card-title">Off-topic Observations</h2><div id="off-topic" class="vstack gap-2 text-body-secondary small">No observations yet.</div></div></div>
-              <div class="card"><div class="card-body"><h2 class="h6 card-title">Transcript</h2><div id="transcript-tail" class="vstack gap-2 text-body-secondary small">No transcript captured yet.</div></div></div>
-              <div class="card"><div class="card-body"><h2 class="h6 card-title">Topic State</h2><div id="topic-state-list" class="vstack gap-2 text-body-secondary small">No active session.</div></div></div>
+              <div class="border rounded overflow-hidden">
+                <div id="live-markdown-pane" class="hljs small font-monospace p-3 mb-0"></div>
+              </div>
 
               <div class="card">
                 <div class="card-body">
@@ -133,7 +129,6 @@
       </div>
     </main>
 
-    <script src="/vendor/bootstrap/js/bootstrap.bundle.min.js"></script>
-    <script type="module" src="/app.js"></script>
+    <script type="module" src="/main.js"></script>
   </body>
 </html>

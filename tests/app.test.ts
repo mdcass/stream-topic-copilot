@@ -18,7 +18,7 @@ async function createRuntimeConfig(): Promise<RuntimeConfig> {
   tempDirs.push(rootDir);
   const dataDir = path.join(rootDir, "data");
   const sessionsDir = path.join(rootDir, "sessions");
-  const publicDir = path.resolve("src/ui/public");
+  const publicDir = path.resolve("src/ui");
   await fs.mkdir(dataDir, { recursive: true });
   await fs.mkdir(sessionsDir, { recursive: true });
   await fs.writeFile(

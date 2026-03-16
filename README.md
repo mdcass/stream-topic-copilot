@@ -108,6 +108,8 @@ npm run typecheck
 npm test
 ```
 
+`npm run dev` now starts both the API server on `http://127.0.0.1:4312` and the Vite UI dev server on `http://127.0.0.1:5173`.
+
 ### Runtime configuration
 
 Copy `.env.example` to `.env` if `install.sh` has not already done it.
@@ -186,7 +188,7 @@ Notes:
 ### Starting a stream session
 
 1. Start the app with `npm run dev`.
-2. Open the printed local URL.
+2. Open `http://127.0.0.1:5173`.
 3. In `Config`, confirm the markdown file, provider choices, microphone, and chunk sensitivity.
 4. Click `Start session`.
 5. If you are using the mock STT provider, paste transcript text into the `Mock Transcript Input` card to simulate live speech.

@@ -1,3 +1,12 @@
+import "bootstrap/dist/css/bootstrap.min.css";
+import "highlight.js/styles/atom-one-light.css";
+
+import "bootstrap";
+import hljs from "highlight.js/lib/core";
+import markdown from "highlight.js/lib/languages/markdown";
+
+hljs.registerLanguage("markdown", markdown);
+
 const state = {
   pollingHandle: null,
   pollingIntervalMs: 2000,
@@ -71,23 +80,154 @@ function createPanelRow(contentHtml) {
   return div;
 }
 
-function renderSuggestions(containerId, items, titleField = "text") {
-  const container = byId(containerId);
-  container.innerHTML = "";
-
-  if (!items || items.length === 0) {
-    setEmptyState(container, "No suggestions yet.");
-    return;
+function highlightMarkdownLine(text) {
+  if (!text) {
+    return "&nbsp;";
   }
 
-  container.classList.remove("text-body-secondary");
-  items.forEach((item) => {
-    const div = createPanelRow(`
-      <div class="fw-semibold">${item[titleField]}</div>
-      <div>${item.rationale}</div>
-      <div class="text-body-secondary">Confidence: ${(item.confidence * 100).toFixed(0)}%</div>
-    `);
-    container.appendChild(div);
+  return hljs.highlight(text, { language: "markdown" }).value;
+}
+
+function formatRelativeSrtTime(sessionStartedAt, isoTime) {
+  const relative = Math.max(0, new Date(isoTime).getTime() - new Date(sessionStartedAt).getTime());
+  const hours = Math.floor(relative / 3600000);
+  const minutes = Math.floor((relative % 3600000) / 60000);
+  const seconds = Math.floor((relative % 60000) / 1000);
+  const milliseconds = relative % 1000;
+  return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")},${String(milliseconds).padStart(3, "0")}`;
+}
+
+function topicMarker(topic) {
+  switch (topic.currentState) {
+    case "covered":
+      return "[x]";
+    case "partial":
+      return "[~]";
+    case "snoozed":
+      return "[>]";
+    case "dismissed":
+      return "[-]";
+    default:
+      return "[ ]";
+  }
+}
+
+function appendMarkdownRow(container, text, options = {}) {
+  const row = document.createElement("div");
+  row.className = "position-relative";
+
+  if (options.topic) {
+    const dropdownWrap = document.createElement("div");
+    dropdownWrap.className = "dropdown position-absolute top-0 start-0";
+
+    const toggle = document.createElement("button");
+    toggle.className = "btn btn-link btn-sm p-0 text-decoration-none font-monospace text-reset";
+    toggle.type = "button";
+    toggle.setAttribute("data-bs-toggle", "dropdown");
+    toggle.setAttribute("aria-expanded", "false");
+    toggle.setAttribute("title", `Current state: ${options.topic.currentState}`);
+    toggle.textContent = topicMarker(options.topic);
+
+    const menu = document.createElement("ul");
+    menu.className = "dropdown-menu dropdown-menu-sm";
+    ["pending", "partial", "covered", "snoozed", "dismissed"].forEach((nextState) => {
+      const item = document.createElement("li");
+      const button = document.createElement("button");
+      button.className = "dropdown-item small";
+      button.type = "button";
+      button.textContent = nextState;
+      button.addEventListener("click", async () => {
+        try {
+          await requestJson("/api/session/topic-state", {
+            method: "POST",
+            body: JSON.stringify({ topicId: options.topic.id, nextState })
+          });
+          await loadState();
+        } catch (error) {
+          showError(error.message);
+        }
+      });
+      item.appendChild(button);
+      menu.appendChild(item);
+    });
+
+    dropdownWrap.appendChild(toggle);
+    dropdownWrap.appendChild(menu);
+    row.appendChild(dropdownWrap);
+  }
+
+  const line = document.createElement("div");
+  line.className = options.topic ? "ps-5" : "";
+  line.innerHTML = highlightMarkdownLine(text);
+  row.appendChild(line);
+  container.appendChild(row);
+}
+
+function sectionLines(title, lines) {
+  return [
+    `## ${title}`,
+    ...(lines.length ? lines : ["- None"]),
+    ""
+  ];
+}
+
+function buildLiveMarkdownRows(data) {
+  const session = data.activeSession;
+  if (!session) {
+    return [
+      { text: "## Session" },
+      { text: "- No active session" }
+    ];
+  }
+
+  const sessionLines = [
+    `- Started: ${new Date(session.startedAt).toLocaleString()}`,
+    `- Status: ${session.status}`,
+    `- Session ID: ${session.id}`,
+    session.lastError ? `- Error: ${session.lastError}` : null,
+    session.resumeWarning ? `- Resume warning: ${session.resumeWarning}` : null
+  ].filter(Boolean);
+
+  const suggestionLines = (items, titleField = "text") => items.map((item) => `- ${item[titleField]} (${Math.round(item.confidence * 100)}%)`);
+  const transcriptLines = session.chunks
+    .slice(-5)
+    .reverse()
+    .flatMap((chunk, index) => [
+      `${index + 1}`,
+      `${formatRelativeSrtTime(session.startedAt, chunk.startedAt)} --> ${formatRelativeSrtTime(session.startedAt, chunk.endedAt)}`,
+      chunk.text,
+      ""
+    ]);
+
+  const rows = [
+    ...sectionLines("Session", sessionLines),
+    ...sectionLines("Active Topics", suggestionLines(session.suggestions.activeTopics)),
+    ...sectionLines("Elaboration Starters", suggestionLines(session.suggestions.elaborationStarters)),
+    ...sectionLines("Adjacent Next Topics", suggestionLines(session.suggestions.adjacentNextTopics)),
+    ...sectionLines("Recovery Prompts", suggestionLines(session.suggestions.recoveryPrompts)),
+    ...sectionLines("Off-topic Observations", suggestionLines(session.offTopicObservations, "label")),
+    ...sectionLines("Transcript", transcriptLines.length ? transcriptLines : ["- No transcript captured yet."]),
+    "## Topic State"
+  ].map((text) => ({ text }));
+
+  Object.values(session.topics)
+    .sort((left, right) => left.originalOrder - right.originalOrder)
+    .forEach((topic) => {
+      rows.push({
+        text: `${topic.section}: ${topic.text}`,
+        topic
+      });
+    });
+
+  return rows;
+}
+
+function renderLiveMarkdown(data) {
+  const container = byId("live-markdown-pane");
+  container.innerHTML = "";
+
+  buildLiveMarkdownRows(data).forEach((row) => {
+    appendMarkdownRow(container, row.text, { topic: row.topic });
   });
 }
 
@@ -117,97 +257,6 @@ function renderMicrophoneDiagnostics(monitor) {
     row.textContent = line;
     container.appendChild(row);
   });
-}
-
-function renderTranscriptTail(events) {
-  const container = byId("transcript-tail");
-  container.innerHTML = "";
-  if (!events || events.length === 0) {
-    setEmptyState(container, "No transcript captured yet.");
-    return;
-  }
-
-  container.classList.remove("text-body-secondary");
-  events.slice().reverse().forEach((event) => {
-    const div = createPanelRow(`
-      <div class="fw-semibold">${new Date(event.timestamp).toLocaleTimeString()}</div>
-      <div>${event.text}</div>
-    `);
-    container.appendChild(div);
-  });
-}
-
-function renderSubtitleChunks(session) {
-  const container = byId("transcript-tail");
-  container.innerHTML = "";
-
-  if (!session?.chunks?.length) {
-    renderTranscriptTail(session?.latestTranscriptTail || []);
-    return;
-  }
-
-  container.classList.remove("text-body-secondary");
-  const sessionStart = new Date(session.startedAt).getTime();
-  const fmt = (isoTime) => {
-    const relative = Math.max(0, new Date(isoTime).getTime() - sessionStart);
-    const hours = Math.floor(relative / 3600000);
-    const minutes = Math.floor((relative % 3600000) / 60000);
-    const seconds = Math.floor((relative % 60000) / 1000);
-    const milliseconds = relative % 1000;
-    return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")},${String(milliseconds).padStart(3, "0")}`;
-  };
-
-  session.chunks.slice(-8).reverse().forEach((chunk, reverseIndex) => {
-    const ordinal = session.chunks.length - reverseIndex;
-    const div = createPanelRow(`
-      <div class="fw-semibold">${ordinal}</div>
-      <div class="text-body-secondary">${fmt(chunk.startedAt)} --> ${fmt(chunk.endedAt)}</div>
-      <div>${chunk.text}</div>
-    `);
-    container.appendChild(div);
-  });
-}
-
-function renderTopicState(session) {
-  const container = byId("topic-state-list");
-  container.innerHTML = "";
-  if (!session) {
-    setEmptyState(container, "No active session.");
-    return;
-  }
-
-  container.classList.remove("text-body-secondary");
-  Object.values(session.topics)
-    .sort((a, b) => a.originalOrder - b.originalOrder)
-    .forEach((topic) => {
-      const row = createPanelRow(`
-        <div class="fw-semibold">${topic.text}</div>
-        <div class="text-body-secondary">${topic.currentState} · ${topic.section}</div>
-      `);
-
-      const actions = document.createElement("div");
-      actions.className = "d-flex flex-wrap gap-2 mt-2";
-      ["partial", "covered", "snoozed", "dismissed"].forEach((nextState) => {
-        const button = document.createElement("button");
-        button.textContent = nextState;
-        button.className = "btn btn-sm btn-outline-secondary";
-        button.type = "button";
-        button.addEventListener("click", async () => {
-          try {
-            await requestJson("/api/session/topic-state", {
-              method: "POST",
-              body: JSON.stringify({ topicId: topic.id, nextState })
-            });
-            await loadState();
-          } catch (error) {
-            showError(error.message);
-          }
-        });
-        actions.appendChild(button);
-      });
-      row.appendChild(actions);
-      container.appendChild(row);
-    });
 }
 
 function renderHistory(entries, targetId, resumable = false) {
@@ -292,7 +341,6 @@ function renderConfig(data) {
 
 function renderLive(data) {
   const session = data.activeSession;
-  const monitor = data.microphoneMonitor;
   const analyzeButton = byId("analyze-now");
   const endButton = byId("end-session");
   const undoButton = byId("undo-action");
@@ -317,13 +365,7 @@ function renderLive(data) {
     undoButton.disabled = true;
     mockTranscriptButton.disabled = true;
     byId("session-meta").textContent = "No active session.";
-    renderSuggestions("active-topics", []);
-    renderSuggestions("elaboration-starters", []);
-    renderSuggestions("adjacent-topics", []);
-    renderSuggestions("recovery-prompts", []);
-    renderSuggestions("off-topic", [], "label");
-    renderTranscriptTail([]);
-    renderTopicState(null);
+    renderLiveMarkdown(data);
     return;
   }
 
@@ -344,14 +386,7 @@ function renderLive(data) {
     session.lastError ? `Error: ${session.lastError}` : null,
     session.resumeWarning
   ].filter(Boolean).join(" · ");
-
-  renderSuggestions("active-topics", session.suggestions.activeTopics);
-  renderSuggestions("elaboration-starters", session.suggestions.elaborationStarters);
-  renderSuggestions("adjacent-topics", session.suggestions.adjacentNextTopics);
-  renderSuggestions("recovery-prompts", session.suggestions.recoveryPrompts);
-  renderSuggestions("off-topic", session.offTopicObservations, "label");
-  renderSubtitleChunks(session);
-  renderTopicState(session);
+  renderLiveMarkdown(data);
 }
 
 async function loadState() {
@@ -480,7 +515,7 @@ function bindEvents() {
   });
 }
 
-  bindEvents();
+bindEvents();
 loadState().catch((error) => showError(error.message));
 state.pollingHandle = setInterval(() => {
   loadState().catch((error) => showError(error.message));
