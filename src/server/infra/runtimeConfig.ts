@@ -1,4 +1,5 @@
 import dotenv from "dotenv";
+import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -6,7 +7,16 @@ import type { ChunkSensitivity, RuntimeConfig } from "../domain/types.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const projectRoot = path.resolve(__dirname, "../../..");
+const projectRoot = resolveProjectRoot();
+
+function resolveProjectRoot(): string {
+  const cwd = process.cwd();
+  if (fs.existsSync(path.join(cwd, "package.json"))) {
+    return cwd;
+  }
+
+  return path.resolve(__dirname, "../../..");
+}
 
 dotenv.config({ path: path.join(projectRoot, ".env") });
 
@@ -62,6 +72,7 @@ export function loadRuntimeConfig(): RuntimeConfig {
     visibleSuggestionCount: parseNumber(process.env.VISIBLE_SUGGESTION_COUNT, 3),
     microphonePermissionHelper: resolveFromRoot(process.env.MIC_PERMISSION_HELPER, "./.bin/request-microphone-permission"),
     microphoneProbeHelper: resolveFromRoot(process.env.MIC_PROBE_HELPER, "./.bin/mic-level-probe"),
+    nativeSystemAudioHelper: resolveFromRoot(process.env.NATIVE_SYSTEM_AUDIO_HELPER, "./.bin/native-system-audio-helper"),
     analysisSchemaPath: resolveFromRoot(undefined, "./docs/scoping/codex-analysis-response-schema.json")
   };
 }

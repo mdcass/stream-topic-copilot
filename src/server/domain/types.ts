@@ -14,12 +14,23 @@ export type TopicStateOrigin = "user" | "analysis" | "inferred";
 export type SessionStatus = "active" | "paused" | "interrupted" | "finished";
 export type ChunkSensitivity = "low" | "medium" | "high";
 export type MicrophonePermissionState = "granted" | "denied" | "not-determined" | "unknown" | "unavailable";
+export type SystemAudioPermissionState = MicrophonePermissionState;
+export type PermissionState = MicrophonePermissionState;
+export type CaptureSourceKind = "microphone" | "system-mix" | "loopback-input" | "native-display-audio" | "native-app-audio";
+export type CaptureSourceTransport = "input-device" | "screencapturekit" | "mock";
+export type CaptureMonitorStatus = "idle" | "running" | "error" | "unsupported";
 
 export type SuggestionBuckets = CodexAnalysisResponse["suggestions"];
 
+export interface SelectedCaptureSourceConfig {
+  id: string;
+  kind: CaptureSourceKind;
+  name: string;
+}
+
 export interface AppConfig {
   markdownFilePath: string;
-  microphoneId: string | null;
+  captureSources: SelectedCaptureSourceConfig[];
   sttProvider: string;
   analysisProvider: string;
   chunkSensitivity: ChunkSensitivity;
@@ -60,28 +71,35 @@ export interface RuntimeConfig {
   visibleSuggestionCount: number;
   microphonePermissionHelper: string;
   microphoneProbeHelper: string;
+  nativeSystemAudioHelper: string;
   analysisSchemaPath: string;
 }
 
-export interface MicrophoneDevice {
+export interface CaptureSourceDescriptor {
   id: string;
   name: string;
+  kind: CaptureSourceKind;
+  groupLabel: string;
+  transport: CaptureSourceTransport;
   manufacturer?: string;
-  transport?: string;
   isDefault: boolean;
+  inputDeviceId?: string;
   probeId?: string;
+  nativeTargetId?: string;
+  nativeDisplayId?: string;
+  bundleId?: string;
+  details?: string;
 }
 
-export type MicrophoneProbeStatus = "idle" | "running" | "error" | "unsupported";
-
-export interface MicrophoneMonitorState {
+export interface CaptureSourceMonitorState {
+  sourceId: string;
+  sourceName: string;
+  sourceKind: CaptureSourceKind;
   provider: string;
-  selectedDeviceId: string | null;
-  selectedDeviceName: string | null;
   level: number;
-  probeStatus: MicrophoneProbeStatus;
-  probeLastUpdatedAt: string | null;
-  probeError: string | null;
+  status: CaptureMonitorStatus;
+  lastUpdatedAt: string | null;
+  error: string | null;
   whisperExecutable: string | null;
   whisperModel: string | null;
   whisperCaptureId: string | null;
@@ -138,10 +156,32 @@ export interface TranscriptEvent {
   id: string;
   timestamp: string;
   text: string;
+  sourceId: string;
+  sourceName: string;
+  sourceKind: CaptureSourceKind;
   speakerHint?: string;
   confidence?: number;
   chunkId?: string;
   replaceLast?: boolean;
+}
+
+export interface DisplayTranscriptLine {
+  key: string;
+  timestamp: string;
+  text: string;
+  sourceId: string;
+  sourceName: string;
+  sourceKind: CaptureSourceKind;
+  muted: boolean;
+}
+
+export interface DisplayTranscriptState {
+  committedLines: DisplayTranscriptLine[];
+  activeLine: DisplayTranscriptLine | null;
+  activeGroupTimestamp: string | null;
+  activeSourceId: string | null;
+  lastSpeechAt: string | null;
+  revision: number;
 }
 
 export interface TranscriptChunk {
@@ -182,14 +222,16 @@ export interface SessionSnapshot {
   endedAt: string | null;
   sttProvider: string;
   analysisProvider: string;
-  microphoneSelection: string | null;
+  captureSources: SelectedCaptureSourceConfig[];
   status: SessionStatus;
   latestTranscriptTail: TranscriptEvent[];
   visibleTranscriptEvents: TranscriptEvent[];
+  displayTranscript: DisplayTranscriptState;
   latestAnalysisAt: string | null;
   proposedMarkdownPath: string;
   liveTranscriptPath: string | null;
   recordedAudioPath: string | null;
+  recordedAudioPaths: Record<string, string[]>;
   approximateTranscriptSrtPath: string | null;
   finalTranscriptSrtPath: string | null;
   chunkSensitivity: ChunkSensitivity;
@@ -204,7 +246,7 @@ export interface SessionSnapshot {
   pendingDecisions: TopicDecision[];
   actionHistory: TopicStateChange[];
   passCount: number;
-  microphoneLevel: number;
+  sourceMonitors: Record<string, CaptureSourceMonitorState>;
   lastError: string | null;
   resumeWarning: string | null;
 }
@@ -235,9 +277,12 @@ export interface AppStateResponse {
       analysis: string[];
     };
   };
-  microphonePermission: MicrophonePermissionState;
-  microphones: MicrophoneDevice[];
-  microphoneMonitor: MicrophoneMonitorState;
+  capturePermissions: {
+    microphone: MicrophonePermissionState;
+    systemAudio: SystemAudioPermissionState;
+  };
+  captureSourceCatalog: CaptureSourceDescriptor[];
+  sourceMonitors: Record<string, CaptureSourceMonitorState>;
   resumableSessions: HistoryEntry[];
   history: HistoryEntry[];
   activeSession: SessionSnapshot | null;
@@ -274,7 +319,7 @@ export function createEmptySuggestions(): SuggestionBuckets {
 export function createDefaultAppConfig(markdownFilePath: string, runtime: RuntimeConfig): AppConfig {
   return {
     markdownFilePath,
-    microphoneId: null,
+    captureSources: [],
     sttProvider: runtime.sttProvider,
     analysisProvider: runtime.analysisProvider,
     chunkSensitivity: runtime.defaultChunkSensitivity,

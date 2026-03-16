@@ -1,14 +1,15 @@
 import { execFile, spawn } from "node:child_process";
+import path from "node:path";
 import { promisify } from "node:util";
 
-import type { MicrophoneDevice, RuntimeConfig, TranscriptEvent } from "../../domain/types.js";
+import type { CaptureSourceDescriptor, RuntimeConfig, TranscriptEvent } from "../../domain/types.js";
 import type { StartSttOptions, SttProvider, SttProviderHandlers, SttProviderSession } from "./providerTypes.js";
 
 const execFileAsync = promisify(execFile);
 
 export class WhisperCppProvider implements SttProvider {
   readonly name = "whisper";
-  private cachedDevices: MicrophoneDevice[] = [];
+  private cachedSources: CaptureSourceDescriptor[] = [];
   private cacheExpiresAt = 0;
   private lastEnumerationError: string | null = null;
   private lastStartError: string | null = null;
@@ -17,23 +18,27 @@ export class WhisperCppProvider implements SttProvider {
 
   constructor(private readonly runtimeConfig: RuntimeConfig) {}
 
-  async listDevices(): Promise<MicrophoneDevice[]> {
-    if (Date.now() < this.cacheExpiresAt && this.cachedDevices.length > 0) {
-      return this.cachedDevices;
+  async listSources(): Promise<CaptureSourceDescriptor[]> {
+    if (Date.now() < this.cacheExpiresAt && this.cachedSources.length > 0) {
+      return this.cachedSources;
     }
 
     try {
       const helperPath = `${this.runtimeConfig.rootDir}/.bin/sdl-audio-devices`;
       const { stdout } = await execFileAsync(helperPath, []);
       const parsed = JSON.parse(stdout) as Array<{ id: string; name: string; isDefault: boolean; }>;
-      this.cachedDevices = parsed.map((device) => ({
+      this.cachedSources = parsed.map((device) => ({
         id: device.id,
         name: device.name,
-        isDefault: device.isDefault
+        kind: classifyInputSource(device.name),
+        groupLabel: groupLabelForInputSource(classifyInputSource(device.name)),
+        transport: "input-device",
+        isDefault: device.isDefault,
+        inputDeviceId: device.id
       }));
       this.cacheExpiresAt = Date.now() + 10_000;
       this.lastEnumerationError = null;
-      return this.cachedDevices;
+      return this.cachedSources;
     } catch (error) {
       this.lastEnumerationError = error instanceof Error ? error.message : String(error);
       return [];
@@ -46,8 +51,8 @@ export class WhisperCppProvider implements SttProvider {
     }
 
     const args = ["-m", this.runtimeConfig.whisperModel, "-sa"];
-    if (options.microphoneId) {
-      args.push("-c", options.microphoneId);
+    if (options.source.inputDeviceId) {
+      args.push("-c", options.source.inputDeviceId);
     }
     if (options.liveTranscriptPath) {
       args.push("-f", options.liveTranscriptPath);
@@ -70,7 +75,7 @@ export class WhisperCppProvider implements SttProvider {
       buffer = segments.pop() ?? "";
 
       for (const segment of segments) {
-        this.publishTranscriptSnapshot(segment, handlers);
+        this.publishTranscriptSnapshot(segment, options.source, handlers);
       }
     });
 
@@ -99,7 +104,7 @@ export class WhisperCppProvider implements SttProvider {
       .replace(/[ \t]+\r/g, "\r");
   }
 
-  private publishTranscriptSnapshot(text: string, handlers: SttProviderHandlers): void {
+  private publishTranscriptSnapshot(text: string, source: CaptureSourceDescriptor, handlers: SttProviderHandlers): void {
     const cleaned = text.replace(/\s+/g, " ").trim();
     if (!cleaned) {
       return;
@@ -118,11 +123,37 @@ export class WhisperCppProvider implements SttProvider {
       id: `evt_${now.toString(36)}`,
       timestamp: new Date().toISOString(),
       text: cleaned,
+      sourceId: source.id,
+      sourceName: source.name,
+      sourceKind: source.kind,
       replaceLast
     };
 
     void handlers.onLevel(Math.min(1, Math.max(0.05, cleaned.length / 160)));
     void handlers.onTranscript(event);
+  }
+
+  async transcribeFile(audioPath: string): Promise<string> {
+    const whisperCliPath = this.resolveWhisperCliPath();
+    if (!whisperCliPath) {
+      throw new Error("whisper-cli could not be resolved from STT_EXECUTABLE.");
+    }
+
+    const { stdout, stderr } = await execFileAsync(whisperCliPath, [
+      "-m",
+      this.runtimeConfig.whisperModel,
+      "-f",
+      audioPath,
+      "-nt",
+      "-np"
+    ], {
+      maxBuffer: 10 * 1024 * 1024
+    });
+    const text = stdout.trim();
+    if (!text && stderr.trim()) {
+      throw new Error(stderr.trim());
+    }
+    return text;
   }
 
   getDebugState(): Record<string, string | null> {
@@ -133,4 +164,23 @@ export class WhisperCppProvider implements SttProvider {
       whisperLastError: this.lastStartError
     };
   }
+
+  private resolveWhisperCliPath(): string | null {
+    if (!this.runtimeConfig.sttExecutable) {
+      return null;
+    }
+
+    return path.join(path.dirname(this.runtimeConfig.sttExecutable), "whisper-cli");
+  }
+}
+
+function classifyInputSource(name: string): "microphone" | "system-mix" {
+  const normalized = name.toLowerCase();
+  return /(blackhole|loopback|zoomaudio|obs|vb[- ]?audio|soundflower)/.test(normalized)
+    ? "system-mix"
+    : "microphone";
+}
+
+function groupLabelForInputSource(kind: ReturnType<typeof classifyInputSource>): string {
+  return kind === "system-mix" ? "Desktop Audio" : "Microphones";
 }

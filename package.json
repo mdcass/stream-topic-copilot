@@ -13,7 +13,7 @@
     "build": "npm run build:ui && npm run build:server",
     "build:ui": "vite build",
     "build:server": "tsc -p tsconfig.json",
-    "start": "node dist/server/index.js",
+    "start": "node dist/src/server/index.js",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
     "test:watch": "vitest"

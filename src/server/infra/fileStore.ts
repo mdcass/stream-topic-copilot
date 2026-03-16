@@ -2,10 +2,12 @@ import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 
+import { rebuildDisplayTranscript } from "../domain/transcript/display.js";
 import type {
   AppConfig,
   HistoryEntry,
   RuntimeConfig,
+  SelectedCaptureSourceConfig,
   SessionSnapshot,
   TopicState,
   TopicStateChange
@@ -30,7 +32,7 @@ export class FileStore {
 
     try {
       const content = await fs.readFile(this.runtimeConfig.configPath, "utf8");
-      return { ...defaultConfig, ...JSON.parse(content) } as AppConfig;
+      return normalizeLoadedConfig(defaultConfig, JSON.parse(content));
     } catch (error) {
       await this.saveConfig(defaultConfig);
       return defaultConfig;
@@ -44,6 +46,10 @@ export class FileStore {
 
   sessionDir(sessionId: string): string {
     return path.join(this.runtimeConfig.sessionsDir, sessionId);
+  }
+
+  sourceDir(sessionId: string, sourceId: string): string {
+    return path.join(this.sessionDir(sessionId), "sources", sourceId.replace(/[^a-zA-Z0-9._-]+/g, "_"));
   }
 
   async createSessionArtifacts(sessionId: string, sourceMarkdown: string): Promise<{ sessionDir: string; sourceSnapshotPath: string; proposedMarkdownPath: string; }> {
@@ -80,8 +86,11 @@ export class FileStore {
     try {
       const sessionPath = path.join(this.sessionDir(sessionId), "session.json");
       const content = await fs.readFile(sessionPath, "utf8");
-      const session = JSON.parse(content) as SessionSnapshot;
+      const session = normalizeLoadedSession(JSON.parse(content)) as SessionSnapshot;
       session.visibleTranscriptEvents ??= [];
+      session.displayTranscript = rebuildDisplayTranscript(
+        session.visibleTranscriptEvents.length ? session.visibleTranscriptEvents : session.latestTranscriptTail
+      );
       return session;
     } catch (error) {
       return null;
@@ -163,4 +172,95 @@ export class FileStore {
   async appendStateChange(sessionId: string, change: TopicStateChange): Promise<void> {
     await this.appendJsonl(sessionId, "topic-state-history.jsonl", change);
   }
+}
+
+function normalizeCaptureSources(value: unknown, fallbackMicrophoneId?: string | null): SelectedCaptureSourceConfig[] {
+  if (Array.isArray(value)) {
+    return value
+      .filter((entry): entry is Record<string, unknown> => Boolean(entry) && typeof entry === "object")
+      .map((entry): SelectedCaptureSourceConfig => {
+        let kind: SelectedCaptureSourceConfig["kind"] = "microphone";
+        if (entry.kind === "loopback-input") {
+          kind = "system-mix";
+        }
+        if (
+          entry.kind === "microphone" ||
+          entry.kind === "system-mix" ||
+          entry.kind === "native-display-audio" ||
+          entry.kind === "native-app-audio"
+        ) {
+          kind = entry.kind;
+        }
+
+        return {
+          id: typeof entry.id === "string" ? entry.id : "",
+          kind,
+          name: typeof entry.name === "string" ? entry.name : "Unknown source"
+        };
+      })
+      .filter((entry) => entry.id.length > 0);
+  }
+
+  if (typeof fallbackMicrophoneId === "string" && fallbackMicrophoneId.length > 0) {
+    return [{
+      id: fallbackMicrophoneId,
+      kind: "microphone",
+      name: fallbackMicrophoneId
+    }];
+  }
+
+  return [];
+}
+
+function normalizeLoadedConfig(defaultConfig: AppConfig, raw: Record<string, unknown>): AppConfig {
+  return {
+    ...defaultConfig,
+    ...raw,
+    captureSources: normalizeCaptureSources(raw.captureSources, typeof raw.microphoneId === "string" ? raw.microphoneId : null)
+  } as AppConfig;
+}
+
+function normalizeLoadedSession(raw: Record<string, unknown>): SessionSnapshot {
+  const session = raw as unknown as SessionSnapshot & {
+    microphoneSelection?: string | null;
+    microphoneLevel?: number;
+  };
+
+  session.captureSources = normalizeCaptureSources(session.captureSources, session.microphoneSelection ?? null);
+  session.recordedAudioPaths ??= {};
+  session.sourceMonitors ??= Object.fromEntries(
+    session.captureSources.map((source) => [source.id, {
+      sourceId: source.id,
+      sourceName: source.name,
+      sourceKind: source.kind,
+      provider: session.sttProvider,
+      level: 0,
+      status: "idle",
+      lastUpdatedAt: null,
+      error: null,
+      whisperExecutable: null,
+      whisperModel: null,
+      whisperCaptureId: null,
+      whisperLastError: null,
+      deviceDiagnostics: []
+    }])
+  );
+
+  for (const event of session.visibleTranscriptEvents ?? session.latestTranscriptTail ?? []) {
+    event.sourceId ??= session.captureSources[0]?.id ?? "legacy-source";
+    event.sourceName ??= session.captureSources[0]?.name ?? "Legacy Source";
+    event.sourceKind ??= session.captureSources[0]?.kind ?? "microphone";
+  }
+  for (const event of session.latestTranscriptTail ?? []) {
+    event.sourceId ??= session.captureSources[0]?.id ?? "legacy-source";
+    event.sourceName ??= session.captureSources[0]?.name ?? "Legacy Source";
+    event.sourceKind ??= session.captureSources[0]?.kind ?? "microphone";
+  }
+  for (const event of session.pendingTranscriptEvents ?? []) {
+    event.sourceId ??= session.captureSources[0]?.id ?? "legacy-source";
+    event.sourceName ??= session.captureSources[0]?.name ?? "Legacy Source";
+    event.sourceKind ??= session.captureSources[0]?.kind ?? "microphone";
+  }
+
+  return session as SessionSnapshot;
 }

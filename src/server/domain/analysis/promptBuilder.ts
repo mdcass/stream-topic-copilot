@@ -33,7 +33,12 @@ export function buildAnalysisPrompt(session: SessionSnapshot, chunk: TranscriptC
     elapsedSeconds: Math.max(0, Math.round((Date.now() - Date.parse(session.startedAt)) / 1000)),
     countsByState: counts,
     analysisPassesCompleted: session.passCount,
-    chunkSensitivity: config.chunkSensitivity
+    chunkSensitivity: config.chunkSensitivity,
+    selectedSources: session.captureSources.map((source) => ({
+      id: source.id,
+      kind: source.kind,
+      name: source.name
+    }))
   };
 
   return [
@@ -60,6 +65,7 @@ export function buildAnalysisPrompt(session: SessionSnapshot, chunk: TranscriptC
     "- topicDecisions should include only changed topics.",
     "- suggestions must populate all categories, even when empty.",
     "- offTopicObservations are display-only and must not imply state changes.",
-    "- Every decision and suggestion needs evidence from this chunk."
+    "- Every decision and suggestion needs evidence from this chunk.",
+    "- Transcript lines may include source tags like [Mock Studio Mic] or [Discord]; use them to distinguish streamer vs system audio evidence."
   ].join("\n");
 }

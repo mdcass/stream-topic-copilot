@@ -1,4 +1,4 @@
-import type { MicrophoneDevice, TranscriptEvent } from "../../domain/types.js";
+import type { CaptureSourceDescriptor, TranscriptEvent } from "../../domain/types.js";
 
 export interface SttProviderHandlers {
   onTranscript: (event: TranscriptEvent) => Promise<void>;
@@ -12,14 +12,15 @@ export interface SttProviderSession {
 }
 
 export interface StartSttOptions {
-  microphoneId: string | null;
+  source: CaptureSourceDescriptor;
   sessionDir?: string;
   liveTranscriptPath?: string;
 }
 
 export interface SttProvider {
   readonly name: string;
-  listDevices(): Promise<MicrophoneDevice[]>;
+  listSources(): Promise<CaptureSourceDescriptor[]>;
   start(options: StartSttOptions, handlers: SttProviderHandlers): Promise<SttProviderSession>;
+  transcribeFile?(audioPath: string): Promise<string>;
   getDebugState?(): Record<string, string | null>;
 }

@@ -1,17 +1,22 @@
 import fs from "node:fs/promises";
+import { execFile } from "node:child_process";
 import path from "node:path";
+import { promisify } from "node:util";
 
 import { codexAnalysisResponseSchema } from "./domain/analysis/schema.js";
+import { buildAnalysisPrompt } from "./domain/analysis/promptBuilder.js";
+import { applyTranscriptDisplayEvent, createEmptyDisplayTranscript } from "./domain/transcript/display.js";
 import { buildApproximateSrt } from "./domain/transcript/subtitles.js";
 import {
   createDefaultAppConfig,
   createEmptySuggestions,
   type AppConfig,
   type AppStateResponse,
+  type CaptureSourceDescriptor,
+  type CaptureSourceMonitorState,
   type ChunkSensitivity,
-  type MicrophoneDevice,
-  type MicrophoneMonitorState,
   type RuntimeConfig,
+  type SelectedCaptureSourceConfig,
   type SessionSnapshot,
   type TopicRecord,
   type TopicState,
@@ -23,8 +28,10 @@ import type { TopicDecision } from "./domain/analysis/schema.js";
 import { parseTopicsMarkdown } from "./domain/topics/markdownParser.js";
 import { buildProposedMarkdown } from "./domain/topics/proposedMarkdown.js";
 import { FileStore } from "./infra/fileStore.js";
-import { getMicrophonePermissionState } from "./infra/microphonePermission.js";
+import { getMicrophonePermissionState, requestMicrophonePermission } from "./infra/microphonePermission.js";
 import { MicrophoneProbe } from "./infra/microphoneProbe.js";
+import { NativeSystemAudioHelper, type NativeCaptureSession } from "./infra/nativeSystemAudioHelper.js";
+import { getSystemAudioPermissionState, requestSystemAudioPermission } from "./infra/systemAudioPermission.js";
 import type { AnalysisProvider } from "./providers/analysis/providerTypes.js";
 import type { SttProvider, SttProviderSession } from "./providers/stt/providerTypes.js";
 
@@ -33,6 +40,10 @@ const sensitivityDefaults: Record<ChunkSensitivity, { words: number; seconds: nu
   medium: { words: 120, seconds: 60 },
   high: { words: 50, seconds: 30 }
 };
+
+const execFileAsync = promisify(execFile);
+const SYSTEM_MIX_SOURCE_ID = "system-mix:default";
+const SYSTEM_MIX_TARGET_ID = "all-displays";
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -85,15 +96,237 @@ function cloneSession(session: SessionSnapshot): SessionSnapshot {
   return JSON.parse(JSON.stringify(session)) as SessionSnapshot;
 }
 
+function cloneMonitor(monitor: CaptureSourceMonitorState): CaptureSourceMonitorState {
+  return JSON.parse(JSON.stringify(monitor)) as CaptureSourceMonitorState;
+}
+
+function normalizeCaptureSources(value: unknown): SelectedCaptureSourceConfig[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .filter((entry): entry is Record<string, unknown> => Boolean(entry) && typeof entry === "object")
+    .map((entry): SelectedCaptureSourceConfig => {
+      let kind: SelectedCaptureSourceConfig["kind"] = "microphone";
+      if (entry.kind === "loopback-input") {
+        kind = "system-mix";
+      }
+      if (
+        entry.kind === "microphone" ||
+        entry.kind === "system-mix" ||
+        entry.kind === "native-display-audio" ||
+        entry.kind === "native-app-audio"
+      ) {
+        kind = entry.kind;
+      }
+
+      return {
+        id: typeof entry.id === "string" ? entry.id : "",
+        kind,
+        name: typeof entry.name === "string" ? entry.name : "Unknown source"
+      };
+    })
+    .filter((entry) => entry.id.length > 0);
+}
+
+function selectedSourceFromDescriptor(source: CaptureSourceDescriptor): SelectedCaptureSourceConfig {
+  return {
+    id: source.id,
+    kind: source.kind,
+    name: source.name
+  };
+}
+
+function createSourceMonitor(provider: string, source: SelectedCaptureSourceConfig | CaptureSourceDescriptor): CaptureSourceMonitorState {
+  return {
+    sourceId: source.id,
+    sourceName: source.name,
+    sourceKind: source.kind,
+    provider,
+    level: 0,
+    status: "idle",
+    lastUpdatedAt: null,
+    error: null,
+    whisperExecutable: null,
+    whisperModel: null,
+    whisperCaptureId: null,
+    whisperLastError: null,
+    deviceDiagnostics: []
+  };
+}
+
+function createChunkText(events: TranscriptEvent[]): string {
+  return events
+    .map((event) => `[${event.sourceName}] ${event.text.trim()}`)
+    .join("\n")
+    .trim();
+}
+
+function sourceArtifactsDir(sessionDir: string, sourceId: string): string {
+  return path.join(sessionDir, "sources", sourceId.replace(/[^a-zA-Z0-9._-]+/g, "_"));
+}
+
+function isNativeCaptureSourceKind(kind: SelectedCaptureSourceConfig["kind"] | CaptureSourceDescriptor["kind"]): boolean {
+  return kind === "native-display-audio" || kind === "native-app-audio";
+}
+
+function groupLabelForSourceKind(kind: SelectedCaptureSourceConfig["kind"]): string {
+  switch (kind) {
+    case "microphone":
+      return "Microphones";
+    case "system-mix":
+      return "Desktop Audio";
+    case "loopback-input":
+      return "Loopback / Routed Inputs";
+    case "native-display-audio":
+      return "Advanced: Displays";
+    case "native-app-audio":
+      return "Advanced: Apps";
+    default:
+      return "Unavailable";
+  }
+}
+
+function collapseCatalogSources(sources: CaptureSourceDescriptor[], options: { preferNativeSystemMix: boolean; nativeHelperConfigured: boolean; }): CaptureSourceDescriptor[] {
+  const inputSources = sources.filter((source) => source.transport === "input-device");
+  const nonInputSources = sources.filter((source) => source.transport !== "input-device");
+  const microphones = inputSources.filter((source) => source.kind === "microphone");
+  const systemMixCandidates = options.preferNativeSystemMix
+    ? nonInputSources.filter((source) => source.kind === "native-display-audio")
+    : inputSources.filter((source) => source.kind === "system-mix" || source.kind === "loopback-input");
+  const collapsedSystemMix = createSystemMixSource(systemMixCandidates, options);
+
+  return [
+    ...microphones,
+    ...(collapsedSystemMix ? [collapsedSystemMix] : []),
+    ...nonInputSources
+  ];
+}
+
+function createSystemMixSource(
+  candidates: CaptureSourceDescriptor[],
+  options: { preferNativeSystemMix: boolean; nativeHelperConfigured: boolean; }
+): CaptureSourceDescriptor | null {
+  if (candidates.length === 0 && !options.preferNativeSystemMix) {
+    return null;
+  }
+
+  if (options.preferNativeSystemMix && !options.nativeHelperConfigured) {
+    return null;
+  }
+
+  if (options.preferNativeSystemMix) {
+    const displayNames = candidates.map((candidate) => candidate.name).sort();
+    return {
+      id: SYSTEM_MIX_SOURCE_ID,
+      name: "Desktop Audio",
+      kind: "system-mix",
+      groupLabel: "Desktop Audio",
+      transport: "screencapturekit",
+      isDefault: true,
+      nativeTargetId: SYSTEM_MIX_TARGET_ID,
+      details: displayNames.length > 0
+        ? `Captures audio across ${displayNames.length} display${displayNames.length === 1 ? "" : "s"}: ${displayNames.join(", ")}.`
+        : "Captures audio across all available displays."
+    };
+  }
+
+  if (candidates.length === 0) {
+    return null;
+  }
+
+  const preferred = candidates.find((candidate) => candidate.isDefault) ?? candidates[0];
+  const backingNames = candidates.map((candidate) => candidate.name).sort();
+
+  return {
+    ...preferred,
+    id: SYSTEM_MIX_SOURCE_ID,
+    name: "Desktop Audio",
+    kind: "system-mix",
+    groupLabel: "Desktop Audio",
+    isDefault: true,
+    details: backingNames.length > 1
+      ? `Backed by ${backingNames.join(", ")}.`
+      : `Backed by ${preferred.name}.`
+  };
+}
+
+function fallbackDescriptorFromSelection(source: SelectedCaptureSourceConfig): CaptureSourceDescriptor {
+  const nativeTargetId = source.kind === "native-display-audio" && source.id.startsWith("display:")
+    ? source.id.slice("display:".length)
+    : source.kind === "native-app-audio" && source.id.startsWith("app-bundle:")
+      ? source.id
+      : source.kind === "native-app-audio" && source.id.startsWith("app:")
+        ? source.id.slice("app:".length)
+        : source.kind === "system-mix"
+          ? SYSTEM_MIX_TARGET_ID
+        : undefined;
+  const bundleId = source.kind === "native-app-audio" && source.id.startsWith("app-bundle:")
+    ? source.id.slice("app-bundle:".length)
+    : undefined;
+
+  return {
+    id: source.id,
+    name: source.name,
+    kind: source.kind,
+    groupLabel: groupLabelForSourceKind(source.kind),
+    transport: isNativeCaptureSourceKind(source.kind) || source.kind === "system-mix" ? "screencapturekit" : "mock",
+    isDefault: false,
+    nativeTargetId,
+    bundleId,
+    details: source.kind === "system-mix"
+      ? "Will retry Desktop Audio when display enumeration and system audio permission are available."
+      : isNativeCaptureSourceKind(source.kind)
+      ? "Will retry this native source when system audio permission and enumeration are available."
+      : undefined
+  };
+}
+
+function describeSystemAudioPermissionIssue(permission: string): string {
+  switch (permission) {
+    case "denied":
+      return "System audio capture permission is denied for the native helper.";
+    case "not-determined":
+      return "System audio capture permission has not been granted yet.";
+    case "unavailable":
+      return "Native system audio capture is unavailable on this machine.";
+    default:
+      return "System audio capture is not ready.";
+  }
+}
+
+function describeUnavailableSource(source: CaptureSourceDescriptor, nativeCatalogError: string | null): string {
+  if (source.kind === "system-mix") {
+    return nativeCatalogError || "Desktop Audio is unavailable because display audio targets could not be enumerated.";
+  }
+
+  if (isNativeCaptureSourceKind(source.kind) && nativeCatalogError) {
+    return nativeCatalogError;
+  }
+
+  return "Selected source is not available.";
+}
+
+function sourceNeedsMicrophonePermission(source: SelectedCaptureSourceConfig): boolean {
+  return source.kind === "microphone" || source.kind === "loopback-input";
+}
+
+function sourceNeedsSystemAudioPermission(source: SelectedCaptureSourceConfig): boolean {
+  return source.kind === "system-mix" || isNativeCaptureSourceKind(source.kind);
+}
+
 export class AppService {
   private readonly fileStore: FileStore;
-  private readonly microphoneProbe: MicrophoneProbe;
+  private readonly nativeSystemAudioHelper: NativeSystemAudioHelper;
   private activeSession: SessionSnapshot | null = null;
-  private activeSttSession: SttProviderSession | null = null;
+  private activeSourceSessions = new Map<string, SttProviderSession>();
+  private activeNativeCaptureSessions = new Map<string, NativeCaptureSession>();
+  private activeNativeTranscriptions = new Map<string, Promise<void>>();
+  private activeProbes = new Map<string, MicrophoneProbe>();
   private config!: AppConfig;
-  private microphones: MicrophoneDevice[] = [];
-  private activeProbeSelectionKey: string | null = null;
-  private microphoneMonitor: MicrophoneMonitorState;
+  private captureSourceCatalog: CaptureSourceDescriptor[] = [];
+  private sourceMonitors: Record<string, CaptureSourceMonitorState> = {};
 
   constructor(
     private readonly runtimeConfig: RuntimeConfig,
@@ -101,21 +334,7 @@ export class AppService {
     private readonly analysisProviders: Map<string, AnalysisProvider>
   ) {
     this.fileStore = new FileStore(runtimeConfig);
-    this.microphoneProbe = new MicrophoneProbe(runtimeConfig);
-    this.microphoneMonitor = {
-      provider: runtimeConfig.sttProvider,
-      selectedDeviceId: null,
-      selectedDeviceName: null,
-      level: 0,
-      probeStatus: "idle",
-      probeLastUpdatedAt: null,
-      probeError: null,
-      whisperExecutable: runtimeConfig.sttExecutable || null,
-      whisperModel: runtimeConfig.whisperModel || null,
-      whisperCaptureId: null,
-      whisperLastError: null,
-      deviceDiagnostics: []
-    };
+    this.nativeSystemAudioHelper = new NativeSystemAudioHelper(runtimeConfig);
   }
 
   async initialize(): Promise<void> {
@@ -132,13 +351,15 @@ export class AppService {
     }
 
     this.config = await this.fileStore.loadConfig(defaultConfig);
-    await this.refreshMicrophonesAndMonitor();
+    this.config.captureSources = normalizeCaptureSources(this.config.captureSources);
+    await this.refreshCaptureSourcesAndMonitors();
   }
 
   async getState(): Promise<AppStateResponse> {
-    const [microphones, microphonePermission, sessions] = await Promise.all([
-      this.refreshMicrophonesAndMonitor(),
+    const [catalog, microphonePermission, systemAudioPermission, sessions] = await Promise.all([
+      this.refreshCaptureSourcesAndMonitors(),
       getMicrophonePermissionState(this.runtimeConfig),
+      getSystemAudioPermissionState(this.runtimeConfig),
       this.fileStore.listSessions()
     ]);
     const history = sessions.map((session) => this.fileStore.summarizeHistory(session));
@@ -156,13 +377,53 @@ export class AppService {
           analysis: Array.from(this.analysisProviders.keys())
         }
       },
-      microphonePermission,
-      microphones,
-      microphoneMonitor: this.microphoneMonitor,
+      capturePermissions: {
+        microphone: microphonePermission,
+        systemAudio: systemAudioPermission
+      },
+      captureSourceCatalog: catalog,
+      sourceMonitors: this.sourceMonitors,
       resumableSessions,
       history,
       activeSession: this.activeSession
     };
+  }
+
+  async requestRelevantPermissions(): Promise<AppStateResponse> {
+    const needsMicrophone = this.config.captureSources.some((source) => sourceNeedsMicrophonePermission(source));
+    const needsSystemAudio = this.config.captureSources.some((source) => sourceNeedsSystemAudioPermission(source));
+
+    if (needsMicrophone) {
+      await requestMicrophonePermission(this.runtimeConfig);
+    }
+    if (needsSystemAudio) {
+      await requestSystemAudioPermission(this.runtimeConfig);
+    }
+
+    await this.refreshCaptureSourcesAndMonitors();
+
+    if (this.activeSession) {
+      this.activeSession.sourceMonitors = Object.fromEntries(
+        Object.entries(this.sourceMonitors).map(([sourceId, monitor]) => [sourceId, cloneMonitor(monitor)])
+      );
+      await this.writeSessionArtifacts();
+    }
+
+    return this.getState();
+  }
+
+  async openRelevantPrivacySettings(): Promise<AppStateResponse> {
+    const needsMicrophone = this.config.captureSources.some((source) => sourceNeedsMicrophonePermission(source));
+    const needsSystemAudio = this.config.captureSources.some((source) => sourceNeedsSystemAudioPermission(source));
+
+    if (needsSystemAudio) {
+      await openPrivacyPane("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture");
+    }
+    if (needsMicrophone) {
+      await openPrivacyPane("x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone");
+    }
+
+    return this.getState();
   }
 
   getActiveSession(): SessionSnapshot | null {
@@ -173,6 +434,7 @@ export class AppService {
     this.config = {
       ...this.config,
       ...nextConfig,
+      captureSources: normalizeCaptureSources(nextConfig.captureSources ?? this.config.captureSources),
       visibleSuggestionCounts: {
         ...this.config.visibleSuggestionCounts,
         ...(nextConfig.visibleSuggestionCounts ?? {})
@@ -180,9 +442,9 @@ export class AppService {
     };
     await this.fileStore.saveConfig(this.config);
 
-    await this.refreshMicrophonesAndMonitor();
+    await this.refreshCaptureSourcesAndMonitors();
 
-    if (this.activeSession && (nextConfig.microphoneId !== undefined || nextConfig.sttProvider !== undefined)) {
+    if (this.activeSession && (nextConfig.captureSources !== undefined || nextConfig.sttProvider !== undefined)) {
       await this.restartStt();
     }
 
@@ -199,6 +461,7 @@ export class AppService {
     const sessionId = createSessionId();
     const artifacts = await this.fileStore.createSessionArtifacts(sessionId, sourceMarkdown);
     const topics = Object.fromEntries(Object.values(document.topics).map((topic) => [topic.id, createTopicRecord(topic)]));
+    const selectedSources = this.resolveSelectedCaptureSources();
     const session: SessionSnapshot = {
       id: sessionId,
       sourceMarkdownPath: this.config.markdownFilePath,
@@ -208,14 +471,16 @@ export class AppService {
       endedAt: null,
       sttProvider: this.config.sttProvider,
       analysisProvider: this.config.analysisProvider,
-      microphoneSelection: this.config.microphoneId,
+      captureSources: selectedSources.map(selectedSourceFromDescriptor),
       status: "active",
       latestTranscriptTail: [],
       visibleTranscriptEvents: [],
+      displayTranscript: createEmptyDisplayTranscript(),
       latestAnalysisAt: null,
       proposedMarkdownPath: artifacts.proposedMarkdownPath,
       liveTranscriptPath: path.join(artifacts.sessionDir, "live-transcript.txt"),
       recordedAudioPath: null,
+      recordedAudioPaths: {},
       approximateTranscriptSrtPath: path.join(artifacts.sessionDir, "transcript.approx.srt"),
       finalTranscriptSrtPath: null,
       chunkSensitivity: this.config.chunkSensitivity,
@@ -230,7 +495,9 @@ export class AppService {
       pendingDecisions: [],
       actionHistory: [],
       passCount: 0,
-      microphoneLevel: 0,
+      sourceMonitors: Object.fromEntries(
+        selectedSources.map((source) => [source.id, cloneMonitor(this.sourceMonitors[source.id] ?? createSourceMonitor(this.config.sttProvider, source))])
+      ),
       lastError: null,
       resumeWarning: null
     };
@@ -257,6 +524,12 @@ export class AppService {
     }
 
     loaded.visibleTranscriptEvents ??= [];
+    loaded.displayTranscript ??= createEmptyDisplayTranscript();
+    loaded.captureSources = normalizeCaptureSources(loaded.captureSources);
+    loaded.recordedAudioPaths ??= {};
+    loaded.sourceMonitors ??= Object.fromEntries(
+      loaded.captureSources.map((source) => [source.id, createSourceMonitor(loaded.sttProvider, source)])
+    );
 
     const currentSourceExists = await this.fileStore.exists(loaded.sourceMarkdownPath);
     if (currentSourceExists) {
@@ -269,7 +542,7 @@ export class AppService {
 
     loaded.status = "active";
     this.activeSession = loaded;
-    await this.refreshMicrophonesAndMonitor();
+    await this.refreshCaptureSourcesAndMonitors();
     await this.writeSessionArtifacts();
     await this.startSttForActiveSession();
     return cloneSession(this.activeSession);
@@ -280,10 +553,7 @@ export class AppService {
       return null;
     }
 
-    if (this.activeSttSession) {
-      await this.activeSttSession.stop().catch(() => undefined);
-      this.activeSttSession = null;
-    }
+    await this.stopAllCaptureSessions();
 
     this.activeSession.status = status;
     this.activeSession.endedAt = nowIso();
@@ -304,7 +574,7 @@ export class AppService {
 
     const finished = cloneSession(this.activeSession);
     this.activeSession = null;
-    await this.refreshMicrophonesAndMonitor();
+    await this.refreshCaptureSourcesAndMonitors();
     return finished;
   }
 
@@ -371,68 +641,161 @@ export class AppService {
     return cloneSession(this.activeSession);
   }
 
-  async injectMockTranscript(text: string): Promise<SessionSnapshot> {
+  async injectMockTranscript(text: string, sourceId?: string): Promise<SessionSnapshot> {
     if (!this.activeSession) {
       throw new Error("No active session.");
     }
 
-    if (!this.activeSttSession?.injectTranscript) {
+    const session = sourceId
+      ? this.activeSourceSessions.get(sourceId)
+      : this.activeSourceSessions.get(this.activeSession.captureSources[0]?.id ?? "");
+    if (!session?.injectTranscript) {
       throw new Error("The active STT provider does not support transcript injection.");
     }
 
-    await this.activeSttSession.injectTranscript(text);
+    await session.injectTranscript(text);
     return cloneSession(this.activeSession);
   }
 
-  private async refreshMicrophonesAndMonitor(): Promise<MicrophoneDevice[]> {
+  private async refreshCaptureSourcesAndMonitors(): Promise<CaptureSourceDescriptor[]> {
     const provider = this.sttProviders.get(this.config.sttProvider) ?? this.sttProviders.get(this.runtimeConfig.sttProvider);
     if (!provider) {
-      this.microphones = [];
-      this.microphoneMonitor.provider = this.config.sttProvider;
-      this.microphoneMonitor.probeStatus = "unsupported";
-      this.microphoneMonitor.deviceDiagnostics = [`Unknown STT provider: ${this.config.sttProvider}`];
+      this.captureSourceCatalog = [];
+      this.sourceMonitors = {};
       return [];
     }
 
-    const devices = await provider.listDevices();
-    this.microphones = await this.microphoneProbe.annotateDevices(devices);
+    const baseSources = await provider.listSources();
+    const annotatedInputSources = await this.annotateInputSources(baseSources);
+    const nativeCatalog = this.config.sttProvider === "whisper"
+      ? await this.nativeSystemAudioHelper.listSourceCatalog()
+      : { sources: [], permissionState: "unavailable" as const, error: null };
+    const nativeSources = nativeCatalog.sources;
+    this.captureSourceCatalog = dedupeSources(collapseCatalogSources([...annotatedInputSources, ...nativeSources], {
+      preferNativeSystemMix: this.config.sttProvider === "whisper",
+      nativeHelperConfigured: Boolean(this.runtimeConfig.nativeSystemAudioHelper)
+    }));
+    this.config.captureSources = this.config.captureSources.map((source) => {
+      const hydrated = this.findCatalogSource(source.id, source);
+      return hydrated ? selectedSourceFromDescriptor(hydrated) : source;
+    });
 
-    const selectedDevice = this.microphones.find((device) => device.id === this.config.microphoneId) ?? null;
-    this.microphoneMonitor.provider = this.config.sttProvider;
-    this.microphoneMonitor.selectedDeviceId = this.config.microphoneId;
-    this.microphoneMonitor.selectedDeviceName = selectedDevice?.name ?? null;
-    this.microphoneMonitor.whisperCaptureId = this.config.sttProvider === "whisper" ? this.config.microphoneId : null;
-    this.microphoneMonitor.whisperExecutable = this.config.sttProvider === "whisper" ? (this.runtimeConfig.sttExecutable || null) : null;
-    this.microphoneMonitor.whisperModel = this.config.sttProvider === "whisper" ? (this.runtimeConfig.whisperModel || null) : null;
+    const selected = this.config.captureSources.length > 0
+      ? this.config.captureSources
+      : [];
+    const nextMonitors: Record<string, CaptureSourceMonitorState> = {};
 
-    const debugState = provider.getDebugState?.() ?? {};
-    this.microphoneMonitor.whisperLastError = debugState.whisperLastError ?? this.microphoneMonitor.whisperLastError;
-    const diagnostics: string[] = [];
-    if (selectedDevice) {
-      diagnostics.push(`Selected device: ${selectedDevice.name} (capture id ${selectedDevice.id})`);
-      if (selectedDevice.probeId) {
-        diagnostics.push("Native activity probe mapped successfully.");
-      } else {
-        diagnostics.push("Native activity probe could not map this device by name.");
+    for (const selectedSource of selected) {
+      const resolvedSource = this.findCatalogSource(selectedSource.id, selectedSource);
+      const source = resolvedSource ?? fallbackDescriptorFromSelection(selectedSource);
+      const existing = this.sourceMonitors[source.id] ?? createSourceMonitor(this.config.sttProvider, source);
+      nextMonitors[source.id] = {
+        ...existing,
+        sourceId: source.id,
+        sourceName: source.name,
+        sourceKind: source.kind,
+        provider: this.config.sttProvider,
+        whisperExecutable: this.config.sttProvider === "whisper" ? (this.runtimeConfig.sttExecutable || null) : null,
+        whisperModel: this.config.sttProvider === "whisper" ? (this.runtimeConfig.whisperModel || null) : null,
+        whisperCaptureId: source.transport === "input-device" ? (source.inputDeviceId ?? null) : null,
+        deviceDiagnostics: buildDiagnostics(source, this.config.sttProvider)
+      };
+      if (!resolvedSource) {
+        nextMonitors[source.id].status = "error";
+        nextMonitors[source.id].error = isNativeCaptureSourceKind(source.kind) && nativeCatalog.permissionState !== "granted"
+          ? describeSystemAudioPermissionIssue(nativeCatalog.permissionState ?? "unknown")
+          : describeUnavailableSource(source, nativeCatalog.error);
       }
-    } else if (this.config.microphoneId) {
-      diagnostics.push(`Configured microphone id ${this.config.microphoneId} is not present in the current device list.`);
-    } else {
-      diagnostics.push("No microphone selected.");
     }
-    if (debugState.whisperDeviceEnumerationError) {
-      diagnostics.push(`Whisper device enumeration error: ${debugState.whisperDeviceEnumerationError}`);
-    }
-    if (debugState.whisperExecutable) {
-      diagnostics.push(`Whisper executable: ${debugState.whisperExecutable}`);
-    }
-    if (debugState.whisperModel) {
-      diagnostics.push(`Whisper model: ${debugState.whisperModel}`);
-    }
-    this.microphoneMonitor.deviceDiagnostics = diagnostics;
 
-    await this.refreshMicrophoneProbe(selectedDevice);
-    return this.microphones;
+    this.sourceMonitors = nextMonitors;
+    await this.refreshInputProbes();
+
+    if (this.activeSession) {
+      this.activeSession.sourceMonitors = Object.fromEntries(
+        Object.entries(this.sourceMonitors).map(([sourceId, monitor]) => [sourceId, cloneMonitor(monitor)])
+      );
+    }
+
+    return this.captureSourceCatalog;
+  }
+
+  private async annotateInputSources(sources: CaptureSourceDescriptor[]): Promise<CaptureSourceDescriptor[]> {
+    const inputSources = sources.filter((source) => source.transport === "input-device");
+    const annotated = await new MicrophoneProbe(this.runtimeConfig).annotateDevices(inputSources);
+    const annotatedById = new Map(annotated.map((source) => [source.id, source]));
+    return sources.map((source) => annotatedById.get(source.id) ?? source);
+  }
+
+  private resolveSelectedCaptureSources(): CaptureSourceDescriptor[] {
+    return this.config.captureSources
+      .map((source) => this.findCatalogSource(source.id, source) ?? fallbackDescriptorFromSelection(source));
+  }
+
+  private findCatalogSource(sourceId: string, fallbackSource?: SelectedCaptureSourceConfig): CaptureSourceDescriptor | null {
+    const direct = this.captureSourceCatalog.find((source) => source.id === sourceId);
+    if (direct) {
+      return direct;
+    }
+
+    if (!fallbackSource) {
+      return null;
+    }
+
+    if (fallbackSource.kind === "native-app-audio" && sourceId.startsWith("app:")) {
+      return this.captureSourceCatalog.find((source) =>
+        source.kind === "native-app-audio" &&
+        source.name === fallbackSource.name
+      ) ?? null;
+    }
+
+    if (fallbackSource.kind === "system-mix" || fallbackSource.kind === "loopback-input") {
+      return this.captureSourceCatalog.find((source) =>
+        source.kind === "system-mix"
+      ) ?? null;
+    }
+
+    return null;
+  }
+
+  private async refreshInputProbes(): Promise<void> {
+    const desiredSources = this.config.sttProvider === "whisper"
+      ? this.resolveSelectedCaptureSources().filter((source) => source.transport === "input-device")
+      : [];
+    const desiredIds = new Set(desiredSources.map((source) => source.id));
+
+    for (const [sourceId, probe] of this.activeProbes.entries()) {
+      if (desiredIds.has(sourceId)) {
+        continue;
+      }
+      await probe.stop().catch(() => undefined);
+      this.activeProbes.delete(sourceId);
+    }
+
+    for (const source of desiredSources) {
+      const monitor = this.sourceMonitors[source.id] ?? createSourceMonitor(this.config.sttProvider, source);
+      this.sourceMonitors[source.id] = monitor;
+      if (!source.probeId) {
+        monitor.error = null;
+        continue;
+      }
+      if (this.activeProbes.has(source.id)) {
+        continue;
+      }
+
+      const probe = new MicrophoneProbe(this.runtimeConfig);
+      this.activeProbes.set(source.id, probe);
+      monitor.status = "running";
+      monitor.error = null;
+      await probe.start(source, {
+        onLevel: (level) => {
+          this.updateSourceLevel(source.id, level);
+        },
+        onError: (message) => {
+          this.updateSourceError(source.id, message);
+        }
+      });
+    }
   }
 
   private async startSttForActiveSession(): Promise<void> {
@@ -445,19 +808,119 @@ export class AppService {
       throw new Error(`Unknown STT provider ${this.activeSession.sttProvider}.`);
     }
 
-    this.activeSttSession = await provider.start(
-      {
-        microphoneId: this.activeSession.microphoneSelection,
-        sessionDir: this.fileStore.sessionDir(this.activeSession.id),
-        liveTranscriptPath: this.activeSession.liveTranscriptPath ?? undefined
-      },
-      {
-        onTranscript: async (event) => this.handleTranscriptEvent(event),
-        onLevel: async (level) => this.handleLevel(level),
-        onError: async (error) => this.handleProviderError(error)
+    const systemAudioPermission = this.activeSession.sttProvider === "whisper"
+      ? await this.nativeSystemAudioHelper.getPermissionState()
+      : "unavailable";
+
+    for (const selectedSource of this.activeSession.captureSources) {
+      const source = this.findCatalogSource(selectedSource.id, selectedSource) ?? fallbackDescriptorFromSelection(selectedSource);
+      const monitor = this.ensureSessionSourceMonitor(source);
+      const sessionDir = sourceArtifactsDir(this.fileStore.sessionDir(this.activeSession.id), source.id);
+      await fs.mkdir(sessionDir, { recursive: true });
+
+      if (source.transport === "screencapturekit" && this.activeSession.sttProvider === "whisper") {
+        if (systemAudioPermission !== "granted") {
+          monitor.status = "error";
+          monitor.error = describeSystemAudioPermissionIssue(systemAudioPermission);
+          monitor.lastUpdatedAt = nowIso();
+          this.syncMonitorToSession(source.id);
+          continue;
+        }
+        if (!provider.transcribeFile) {
+          monitor.status = "unsupported";
+          monitor.error = "The configured STT provider cannot transcribe native audio segments.";
+          this.syncMonitorToSession(source.id);
+          continue;
+        }
+
+        const nativeBackingSources = source.kind === "system-mix"
+          ? this.captureSourceCatalog.filter((candidate) => candidate.kind === "native-display-audio")
+          : [source];
+        if (nativeBackingSources.length === 0) {
+          monitor.status = "error";
+          monitor.error = "Desktop Audio could not find any available displays to capture.";
+          monitor.lastUpdatedAt = nowIso();
+          this.syncMonitorToSession(source.id);
+          continue;
+        }
+
+        const childFailures = new Map<string, string>();
+        const handleNativeLevel = (nativeSourceId: string, level: number) => {
+          childFailures.delete(nativeSourceId);
+          this.updateSourceLevel(source.id, level);
+        };
+        const handleNativeSegment = (nativeSourceId: string, payload: { path: string; startedAt: string; endedAt: string; }) => {
+          childFailures.delete(nativeSourceId);
+          void this.queueNativeSegmentTranscription(source, payload.path, payload.endedAt, provider);
+        };
+        const handleNativeError = (nativeSourceId: string, message: string) => {
+          childFailures.set(nativeSourceId, message);
+          if (childFailures.size >= nativeBackingSources.length) {
+            this.updateSourceError(source.id, message);
+            return;
+          }
+
+          const activeMonitor = this.sourceMonitors[source.id];
+          if (activeMonitor) {
+            activeMonitor.whisperLastError = message;
+            activeMonitor.lastUpdatedAt = nowIso();
+            this.syncMonitorToSession(source.id);
+          }
+        };
+
+        const captureSessions = await Promise.all(nativeBackingSources.map(async (nativeSource) => {
+          const nativeOutputDir = source.kind === "system-mix"
+            ? path.join(sessionDir, nativeSource.nativeTargetId ?? nativeSource.id.replace(/[^a-zA-Z0-9._-]+/g, "_"))
+            : sessionDir;
+          await fs.mkdir(nativeOutputDir, { recursive: true });
+          return this.nativeSystemAudioHelper.startCapture(nativeSource, nativeOutputDir, {
+            onLevel: (level) => handleNativeLevel(nativeSource.id, level),
+            onSegment: (payload) => handleNativeSegment(nativeSource.id, payload),
+            onError: (message) => handleNativeError(nativeSource.id, message)
+          });
+        }));
+        const captureSession: NativeCaptureSession = {
+          stop: async () => {
+            await Promise.all(captureSessions.map((session) => session.stop().catch(() => undefined)));
+          }
+        };
+        this.activeNativeCaptureSessions.set(source.id, captureSession);
+        monitor.status = "running";
+        monitor.lastUpdatedAt = nowIso();
+        monitor.error = null;
+        this.syncMonitorToSession(source.id);
+        continue;
       }
-    );
-    this.microphoneMonitor.whisperCaptureId = this.activeSession.microphoneSelection;
+
+      const sttSession = await provider.start(
+        {
+          source,
+          sessionDir,
+          liveTranscriptPath: path.join(sessionDir, "live-transcript.txt")
+        },
+        {
+          onTranscript: async (event) => this.handleTranscriptEvent(event),
+          onLevel: async (level) => this.updateSourceLevel(source.id, level),
+          onError: async (error) => this.updateSourceError(source.id, error.message)
+        }
+      );
+      this.activeSourceSessions.set(source.id, sttSession);
+      monitor.status = "running";
+      monitor.lastUpdatedAt = nowIso();
+      monitor.error = null;
+      this.syncMonitorToSession(source.id);
+    }
+  }
+
+  private async stopAllCaptureSessions(): Promise<void> {
+    await Promise.all([
+      ...Array.from(this.activeSourceSessions.values()).map((session) => session.stop().catch(() => undefined)),
+      ...Array.from(this.activeNativeCaptureSessions.values()).map((session) => session.stop().catch(() => undefined))
+    ]);
+    this.activeSourceSessions.clear();
+    this.activeNativeCaptureSessions.clear();
+    await Promise.all(Array.from(this.activeNativeTranscriptions.values()).map((promise) => promise.catch(() => undefined)));
+    this.activeNativeTranscriptions.clear();
   }
 
   private async restartStt(): Promise<void> {
@@ -465,91 +928,108 @@ export class AppService {
       return;
     }
 
-    if (this.activeSttSession) {
-      await this.activeSttSession.stop().catch(() => undefined);
-      this.activeSttSession = null;
-    }
-
-    this.activeSession.microphoneSelection = this.config.microphoneId;
+    await this.stopAllCaptureSessions();
+    this.activeSession.captureSources = this.resolveSelectedCaptureSources().map(selectedSourceFromDescriptor);
     this.activeSession.sttProvider = this.config.sttProvider;
-    await this.refreshMicrophonesAndMonitor();
+    await this.refreshCaptureSourcesAndMonitors();
     await this.startSttForActiveSession();
     await this.writeSessionArtifacts();
   }
 
-  private async handleLevel(level: number): Promise<void> {
-    this.microphoneMonitor.level = level;
-    this.microphoneMonitor.probeLastUpdatedAt = nowIso();
+  private ensureSessionSourceMonitor(source: CaptureSourceDescriptor): CaptureSourceMonitorState {
+    const existing = this.sourceMonitors[source.id] ?? createSourceMonitor(this.config.sttProvider, source);
+    this.sourceMonitors[source.id] = existing;
     if (this.activeSession) {
-      this.activeSession.microphoneLevel = level;
+      this.activeSession.sourceMonitors[source.id] = cloneMonitor(existing);
+      return existing;
     }
+    return existing;
   }
 
-  private async handleProviderError(error: Error): Promise<void> {
-    this.microphoneMonitor.whisperLastError = error.message;
+  private syncMonitorToSession(sourceId: string): void {
     if (!this.activeSession) {
       return;
     }
 
-    this.activeSession.lastError = error.message;
-    await this.writeSessionArtifacts();
+    const monitor = this.sourceMonitors[sourceId];
+    if (!monitor) {
+      return;
+    }
+
+    this.activeSession.sourceMonitors[sourceId] = cloneMonitor(monitor);
   }
 
-  private async refreshMicrophoneProbe(selectedDevice: MicrophoneDevice | null): Promise<void> {
-    if (this.config.sttProvider !== "whisper") {
-      if (this.activeProbeSelectionKey !== null) {
-        await this.microphoneProbe.stop();
-        this.activeProbeSelectionKey = null;
-      }
-      this.microphoneMonitor.level = 0;
-      this.microphoneMonitor.probeStatus = "idle";
-      this.microphoneMonitor.probeError = null;
+  private updateSourceLevel(sourceId: string, level: number): void {
+    const monitor = this.sourceMonitors[sourceId];
+    if (!monitor) {
       return;
     }
 
-    if (!selectedDevice) {
-      if (this.activeProbeSelectionKey !== null) {
-        await this.microphoneProbe.stop();
-        this.activeProbeSelectionKey = null;
-      }
-      this.microphoneMonitor.level = 0;
-      this.microphoneMonitor.probeStatus = "idle";
-      this.microphoneMonitor.probeError = "Select a microphone to start the activity probe.";
+    monitor.level = level;
+    monitor.lastUpdatedAt = nowIso();
+    monitor.status = "running";
+    monitor.error = null;
+    this.syncMonitorToSession(sourceId);
+  }
+
+  private updateSourceError(sourceId: string, message: string): void {
+    const monitor = this.sourceMonitors[sourceId];
+    if (monitor) {
+      monitor.status = "error";
+      monitor.error = message;
+      monitor.whisperLastError = message;
+      this.syncMonitorToSession(sourceId);
+    }
+
+    if (this.activeSession) {
+      const sourceName = this.activeSession.captureSources.find((source) => source.id === sourceId)?.name ?? sourceId;
+      this.activeSession.lastError = `[${sourceName}] ${message}`;
+      void this.writeSessionArtifacts();
+    }
+  }
+
+  private async queueNativeSegmentTranscription(
+    source: CaptureSourceDescriptor,
+    audioPath: string,
+    endedAt: string,
+    provider: SttProvider
+  ): Promise<void> {
+    if (!provider.transcribeFile) {
       return;
     }
 
-    if (!selectedDevice.probeId) {
-      if (this.activeProbeSelectionKey !== `${selectedDevice.id}:unmapped`) {
-        await this.microphoneProbe.stop();
+    const previous = this.activeNativeTranscriptions.get(source.id) ?? Promise.resolve();
+    const transcribeFile = provider.transcribeFile;
+    const next = previous.then(async () => {
+      if (!this.activeSession) {
+        return;
       }
-      this.activeProbeSelectionKey = `${selectedDevice.id}:unmapped`;
-      this.microphoneMonitor.level = 0;
-      this.microphoneMonitor.probeStatus = "error";
-      this.microphoneMonitor.probeError = `No native probe mapping found for ${selectedDevice.name}.`;
-      return;
-    }
 
-    const nextSelectionKey = `${selectedDevice.id}:${selectedDevice.probeId}`;
-    if (this.activeProbeSelectionKey === nextSelectionKey) {
-      return;
-    }
+      const sourcePaths = this.activeSession.recordedAudioPaths[source.id] ?? [];
+      sourcePaths.push(audioPath);
+      this.activeSession.recordedAudioPaths[source.id] = sourcePaths;
+      this.activeSession.recordedAudioPath = audioPath;
 
-    this.microphoneMonitor.probeStatus = "running";
-    this.microphoneMonitor.probeError = null;
-    await this.microphoneProbe.start(selectedDevice, {
-      onLevel: (level) => {
-        this.microphoneMonitor.level = level;
-        this.microphoneMonitor.probeLastUpdatedAt = nowIso();
-        if (this.activeSession) {
-          this.activeSession.microphoneLevel = level;
-        }
-      },
-      onError: (message) => {
-        this.microphoneMonitor.probeStatus = "error";
-        this.microphoneMonitor.probeError = message;
+      const text = (await transcribeFile(audioPath)).replace(/\s+/g, " ").trim();
+      if (!text) {
+        await this.writeSessionArtifacts();
+        return;
       }
+
+      await this.handleTranscriptEvent({
+        id: `evt_${Date.now().toString(36)}`,
+        timestamp: endedAt,
+        text,
+        sourceId: source.id,
+        sourceName: source.name,
+        sourceKind: source.kind
+      });
+    }).catch((error) => {
+      this.updateSourceError(source.id, error instanceof Error ? error.message : String(error));
     });
-    this.activeProbeSelectionKey = nextSelectionKey;
+
+    this.activeNativeTranscriptions.set(source.id, next);
+    await next;
   }
 
   private async handleTranscriptEvent(event: TranscriptEvent): Promise<void> {
@@ -558,17 +1038,20 @@ export class AppService {
     }
 
     this.activeSession.visibleTranscriptEvents.push({ ...event });
+    applyTranscriptDisplayEvent(this.activeSession.displayTranscript, event);
 
-    if (event.replaceLast && this.activeSession.pendingTranscriptEvents.length > 0) {
-      const lastPending = this.activeSession.pendingTranscriptEvents[this.activeSession.pendingTranscriptEvents.length - 1];
-      if (!lastPending.chunkId) {
-        this.activeSession.pendingTranscriptEvents[this.activeSession.pendingTranscriptEvents.length - 1] = event;
-      } else {
-        this.activeSession.pendingTranscriptEvents.push(event);
+    const lastPending = this.activeSession.pendingTranscriptEvents[this.activeSession.pendingTranscriptEvents.length - 1];
+    if (event.replaceLast && lastPending && lastPending.sourceId === event.sourceId && !lastPending.chunkId) {
+      this.activeSession.pendingTranscriptEvents[this.activeSession.pendingTranscriptEvents.length - 1] = event;
+      let tailIndex = -1;
+      for (let index = this.activeSession.latestTranscriptTail.length - 1; index >= 0; index -= 1) {
+        const entry = this.activeSession.latestTranscriptTail[index];
+        if (entry.sourceId === event.sourceId && !entry.chunkId) {
+          tailIndex = index;
+          break;
+        }
       }
-
-      const tailIndex = this.activeSession.latestTranscriptTail.length - 1;
-      if (tailIndex >= 0 && !this.activeSession.latestTranscriptTail[tailIndex].chunkId) {
+      if (tailIndex >= 0) {
         this.activeSession.latestTranscriptTail[tailIndex] = event;
       } else {
         this.activeSession.latestTranscriptTail.push(event);
@@ -600,7 +1083,7 @@ export class AppService {
     const timeThresholdSeconds = this.runtimeConfig.chunkTimeThresholdSeconds ?? thresholds.seconds;
     const startedAt = Date.parse(this.activeSession.pendingTranscriptEvents[0].timestamp);
     const endedAt = Date.parse(this.activeSession.pendingTranscriptEvents[this.activeSession.pendingTranscriptEvents.length - 1].timestamp);
-    const text = this.activeSession.pendingTranscriptEvents.map((event) => event.text.trim()).join(" ").trim();
+    const text = createChunkText(this.activeSession.pendingTranscriptEvents);
     const words = wordCount(text);
     const durationSeconds = Math.max(0, Math.round((endedAt - startedAt) / 1000));
     const sentenceComplete = /[.!?]["']?$/.test(text);
@@ -659,12 +1142,15 @@ export class AppService {
     const requestPayload = {
       chunkId: chunk.id,
       sessionId: this.activeSession.id,
-      unresolvedTopics: Object.values(this.activeSession.topics).filter((topic) => topic.currentState === "pending" || topic.currentState === "partial").map((topic) => ({
-        id: topic.id,
-        text: topic.text,
-        state: topic.currentState
-      })),
-      chunk
+      unresolvedTopics: Object.values(this.activeSession.topics)
+        .filter((topic) => topic.currentState === "pending" || topic.currentState === "partial")
+        .map((topic) => ({
+          id: topic.id,
+          text: topic.text,
+          state: topic.currentState
+        })),
+      chunk,
+      promptPreview: buildAnalysisPrompt(this.activeSession, chunk, this.config)
     };
     await this.fileStore.appendJsonl(this.activeSession.id, "analysis.requests.jsonl", requestPayload);
 
@@ -841,92 +1327,103 @@ export class AppService {
       return;
     }
 
-    const recordedAudioPath = await this.findRecordedAudioPath(session.id);
-    session.recordedAudioPath = recordedAudioPath;
-    if (!recordedAudioPath) {
-      session.finalTranscriptSrtPath = session.approximateTranscriptSrtPath;
+    session.finalTranscriptSrtPath = session.approximateTranscriptSrtPath;
+    const provider = this.sttProviders.get(session.sttProvider);
+    if (!provider?.transcribeFile) {
       return;
     }
 
-    const whisperCliPath = this.resolveWhisperCliPath();
-    if (!whisperCliPath) {
-      session.finalTranscriptSrtPath = session.approximateTranscriptSrtPath;
-      return;
-    }
-
-    try {
-      const outputBase = path.join(this.fileStore.sessionDir(session.id), "transcript.final");
-      const { spawn } = await import("node:child_process");
-      await new Promise<void>((resolve, reject) => {
-        const child = spawn(whisperCliPath, [
-          "-m",
-          this.runtimeConfig.whisperModel,
-          "-f",
-          recordedAudioPath,
-          "-osrt",
-          "-ojf",
-          "-sow",
-          "-of",
-          outputBase,
-          "-np"
-        ], {
-          stdio: ["ignore", "pipe", "pipe"]
-        });
-
-        let stderr = "";
-        child.stderr.setEncoding("utf8");
-        child.stderr.on("data", (chunk: string) => {
-          stderr += chunk;
-        });
-
-        child.on("error", reject);
-        child.on("exit", (code) => {
-          if (code === 0) {
-            resolve();
-            return;
-          }
-
-          reject(new Error(stderr.trim() || `whisper-cli exited with code ${code}`));
-        });
-      });
-
-      const finalSrtPath = `${outputBase}.srt`;
-      if (await this.fileStore.exists(finalSrtPath)) {
-        session.finalTranscriptSrtPath = finalSrtPath;
-      } else {
-        session.finalTranscriptSrtPath = session.approximateTranscriptSrtPath;
+    const sourcesWithAudio = Object.entries(session.recordedAudioPaths).filter(([, paths]) => paths.length > 0);
+    for (const [sourceId, paths] of sourcesWithAudio) {
+      const latestPath = paths[paths.length - 1];
+      if (!latestPath) {
+        continue;
       }
-    } catch (error) {
-      session.lastError = `${session.lastError ? `${session.lastError} · ` : ""}Final subtitle export failed: ${error instanceof Error ? error.message : String(error)}`;
-      session.finalTranscriptSrtPath = session.approximateTranscriptSrtPath;
+
+      session.recordedAudioPath = latestPath;
+      const outputBase = path.join(sourceArtifactsDir(this.fileStore.sessionDir(session.id), sourceId), "transcript.final");
+      const whisperCliPath = path.join(path.dirname(this.runtimeConfig.sttExecutable), "whisper-cli");
+      try {
+        const { spawn } = await import("node:child_process");
+        await new Promise<void>((resolve, reject) => {
+          const child = spawn(whisperCliPath, [
+            "-m",
+            this.runtimeConfig.whisperModel,
+            "-f",
+            latestPath,
+            "-osrt",
+            "-ojf",
+            "-sow",
+            "-of",
+            outputBase,
+            "-np"
+          ], {
+            stdio: ["ignore", "pipe", "pipe"]
+          });
+
+          let stderr = "";
+          child.stderr.setEncoding("utf8");
+          child.stderr.on("data", (chunk: string) => {
+            stderr += chunk;
+          });
+
+          child.on("error", reject);
+          child.on("exit", (code) => {
+            if (code === 0) {
+              resolve();
+              return;
+            }
+
+            reject(new Error(stderr.trim() || `whisper-cli exited with code ${code}`));
+          });
+        });
+      } catch (error) {
+        session.lastError = `${session.lastError ? `${session.lastError} · ` : ""}Final subtitle export failed: ${error instanceof Error ? error.message : String(error)}`;
+      }
     }
   }
+}
 
-  private async findRecordedAudioPath(sessionId: string): Promise<string | null> {
-    const sessionDir = this.fileStore.sessionDir(sessionId);
-    const entries = await fs.readdir(sessionDir).catch(() => []);
-    const candidates = entries
-      .filter((name) => name.toLowerCase().endsWith(".wav"))
-      .map((name) => path.join(sessionDir, name));
-
-    if (candidates.length === 0) {
-      return null;
+function dedupeSources(sources: CaptureSourceDescriptor[]): CaptureSourceDescriptor[] {
+  const map = new Map<string, CaptureSourceDescriptor>();
+  for (const source of sources) {
+    map.set(source.id, source);
+  }
+  return Array.from(map.values()).sort((left, right) => {
+    if (left.groupLabel === right.groupLabel) {
+      return left.name.localeCompare(right.name);
     }
+    return left.groupLabel.localeCompare(right.groupLabel);
+  });
+}
 
-    const stats = await Promise.all(candidates.map(async (target) => ({
-      target,
-      stat: await fs.stat(target)
-    })));
-    stats.sort((left, right) => right.stat.mtimeMs - left.stat.mtimeMs);
-    return stats[0]?.target ?? null;
+function buildDiagnostics(source: CaptureSourceDescriptor, provider: string): string[] {
+  const diagnostics = [
+    `Selected source: ${source.name}`,
+    `Kind: ${source.kind}`,
+    `Transport: ${source.transport}`
+  ];
+
+  if (source.kind === "system-mix") {
+    diagnostics.push("Desktop Audio captures system audio across all available displays.");
+  }
+  if (provider === "whisper" && source.inputDeviceId) {
+    diagnostics.push(`Whisper capture id: ${source.inputDeviceId}`);
+  }
+  if (source.bundleId) {
+    diagnostics.push(`Bundle id: ${source.bundleId}`);
+  }
+  if (source.details) {
+    diagnostics.push(source.details);
   }
 
-  private resolveWhisperCliPath(): string | null {
-    if (!this.runtimeConfig.sttExecutable) {
-      return null;
-    }
+  return diagnostics;
+}
 
-    const candidate = path.join(path.dirname(this.runtimeConfig.sttExecutable), "whisper-cli");
-    return candidate;
+async function openPrivacyPane(target: string): Promise<void> {
+  try {
+    await execFileAsync("open", [target]);
+  } catch {
+    // Best-effort only. State refresh after this still tells the UI whether permission changed.
   }
 }

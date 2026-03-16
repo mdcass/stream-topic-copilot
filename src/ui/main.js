@@ -18,7 +18,12 @@ const state = {
   transcriptRender: {
     keys: new Set(),
     textByKey: new Map()
-  }
+  },
+  captureSourceRender: {
+    optionsSignature: "",
+    selectedSignature: ""
+  },
+  dismissedPermissionSignature: null
 };
 
 const topicStates = ["pending", "partial", "covered", "snoozed", "dismissed"];
@@ -55,10 +60,24 @@ function clearError() {
   pill.title = "";
 }
 
+function getSelectedCaptureSources() {
+  const select = byId("capture-sources");
+  const selectedIds = Array.from(select.selectedOptions).map((option) => option.value);
+  const catalog = state.data?.captureSourceCatalog || [];
+  return selectedIds
+    .map((id) => catalog.find((source) => source.id === id))
+    .filter(Boolean)
+    .map((source) => ({
+      id: source.id,
+      kind: source.kind,
+      name: source.name
+    }));
+}
+
 function collectConfigFormValues() {
   return {
     markdownFilePath: byId("markdown-path").value,
-    microphoneId: byId("microphone-id").value || null,
+    captureSources: getSelectedCaptureSources(),
     sttProvider: byId("stt-provider").value,
     analysisProvider: byId("analysis-provider").value,
     chunkSensitivity: byId("chunk-sensitivity").value,
@@ -232,7 +251,7 @@ function appendTopicDetails(container, topicId, label, childTopics, session, sug
 
     const elaborationPrompts = suggestionIndex.elaborationByTopic.get(childTopic.id) || [];
     elaborationPrompts.forEach((prompt) => {
-      appendMarkdownRow(childContainer, `    - 💬 ${prompt.text} (${Math.round(prompt.confidence * 100)}%)`);
+      appendMarkdownRow(childContainer, `    - ${prompt.text} (${Math.round(prompt.confidence * 100)}%)`);
     });
   });
 
@@ -284,7 +303,7 @@ function buildSuggestionIndex(session) {
 function buildTopicLine(topic, suggestionIndex, isChild = false) {
   const activePrompt = suggestionIndex.activeByTopic.get(topic.id);
   const prefix = isChild ? "  - " : "- ";
-  const focusText = activePrompt ? `  ⭐ ${Math.round(activePrompt.confidence * 100)}%` : "";
+  const focusText = activePrompt ? `  ${Math.round(activePrompt.confidence * 100)}%` : "";
   return `${prefix}${topic.text}${focusText}`;
 }
 
@@ -332,7 +351,7 @@ function renderTalkingPointsSection(container, session, suggestionIndex) {
 
       const elaborationPrompts = suggestionIndex.elaborationByTopic.get(topic.id) || [];
       elaborationPrompts.forEach((prompt) => {
-        appendMarkdownRow(container, `  - 💬 ${prompt.text} (${Math.round(prompt.confidence * 100)}%)`);
+        appendMarkdownRow(container, `  - ${prompt.text} (${Math.round(prompt.confidence * 100)}%)`);
       });
 
       const childTopics = topic.children
@@ -357,47 +376,16 @@ function renderSuggestionSection(container, title, items, emptyMessage) {
   sectionLines(title, lines).forEach((text) => appendMarkdownRow(container, text));
 }
 
-function isSuppressedTranscriptEvent(text) {
-  const normalized = text.trim().toLowerCase();
-  return normalized === "[blank_audio]" || normalized === "[typing]" || normalized === "(typing)" || normalized === "[start speaking]";
-}
+function buildTranscriptDisplayRows(session) {
+  const displayTranscript = session.displayTranscript;
+  if (!displayTranscript) {
+    return [];
+  }
 
-function buildTranscriptManuscript(session) {
-  const transcriptSource = session.visibleTranscriptEvents?.length
-    ? session.visibleTranscriptEvents
-    : session.latestTranscriptTail;
-  const lines = [];
-
-  transcriptSource.forEach((event) => {
-    const suppressed = isSuppressedTranscriptEvent(event.text);
-
-    if (event.replaceLast && lines.length > 0) {
-      if (suppressed) {
-        lines.pop();
-        return;
-      }
-
-      lines[lines.length - 1] = {
-        text: event.text,
-        timestamp: event.timestamp
-      };
-      return;
-    }
-
-    if (suppressed) {
-      return;
-    }
-
-    lines.push({
-      text: event.text,
-      timestamp: event.timestamp
-    });
-  });
-
-  return lines.map((line, index) => ({
-    key: `line-${index}`,
-    ...line
-  }));
+  return [
+    ...displayTranscript.committedLines,
+    ...(displayTranscript.activeLine ? [displayTranscript.activeLine] : [])
+  ];
 }
 
 function animateTranscriptRow(row, mode = "insert") {
@@ -407,30 +395,12 @@ function animateTranscriptRow(row, mode = "insert") {
 
   const keyframes = mode === "rewrite"
     ? [
-      {
-        opacity: 0.35,
-        filter: "blur(3px)",
-        clipPath: "inset(0 100% 0 0)"
-      },
-      {
-        opacity: 1,
-        filter: "blur(0)",
-        clipPath: "inset(0 0 0 0)"
-      }
+      { opacity: 0.35, filter: "blur(3px)", clipPath: "inset(0 100% 0 0)" },
+      { opacity: 1, filter: "blur(0)", clipPath: "inset(0 0 0 0)" }
     ]
     : [
-      {
-        opacity: 0,
-        filter: "blur(3px)",
-        clipPath: "inset(0 100% 0 0)",
-        transform: "translateY(4px)"
-      },
-      {
-        opacity: 1,
-        filter: "blur(0)",
-        clipPath: "inset(0 0 0 0)",
-        transform: "translateY(0)"
-      }
+      { opacity: 0, filter: "blur(3px)", clipPath: "inset(0 100% 0 0)", transform: "translateY(4px)" },
+      { opacity: 1, filter: "blur(0)", clipPath: "inset(0 0 0 0)", transform: "translateY(0)" }
     ];
 
   row.animate(keyframes, {
@@ -439,26 +409,44 @@ function animateTranscriptRow(row, mode = "insert") {
   });
 }
 
+function badgeClassForSource(kind) {
+  switch (kind) {
+    case "system-mix":
+      return "text-bg-warning";
+    case "loopback-input":
+      return "text-bg-warning";
+    case "native-display-audio":
+      return "text-bg-info";
+    case "native-app-audio":
+      return "text-bg-primary";
+    default:
+      return "text-bg-success";
+  }
+}
+
 function createTranscriptRow(line, session) {
   const row = document.createElement("div");
-  row.className = [
-    "d-flex",
-    "gap-2",
-    "align-items-start",
-    "py-1"
-  ].filter(Boolean).join(" ");
+  row.className = "d-flex gap-2 align-items-start py-1";
 
   const time = document.createElement("div");
   time.className = "text-body-secondary flex-shrink-0";
   time.style.minWidth = "4.5rem";
   time.textContent = formatSessionOffset(session.startedAt, line.timestamp);
 
+  const body = document.createElement("div");
+  body.className = "d-flex gap-2 align-items-start flex-wrap";
+
+  const badge = document.createElement("span");
+  badge.className = `badge ${badgeClassForSource(line.sourceKind)}`;
+  badge.textContent = line.sourceName;
+
   const text = document.createElement("div");
-  text.className = "text-body-emphasis";
+  text.className = line.muted ? "text-body-secondary fst-italic" : "text-body-emphasis";
   text.style.whiteSpace = "pre-wrap";
   text.textContent = line.text;
 
-  row.append(time, text);
+  body.append(badge, text);
+  row.append(time, body);
   return row;
 }
 
@@ -480,11 +468,10 @@ function renderTranscriptPane(session) {
       keys: new Set(),
       textByKey: new Map()
     };
-    container.scrollTop = container.scrollHeight;
     return;
   }
 
-  const transcriptLines = buildTranscriptManuscript(session);
+  const transcriptLines = buildTranscriptDisplayRows(session);
 
   if (!transcriptLines.length) {
     const empty = document.createElement("div");
@@ -495,7 +482,6 @@ function renderTranscriptPane(session) {
       keys: new Set(),
       textByKey: new Map()
     };
-    container.scrollTop = container.scrollHeight;
     return;
   }
 
@@ -575,31 +561,126 @@ function renderLiveMarkdown(data) {
   renderTranscriptPane(session);
 }
 
-function renderMicrophoneDiagnostics(monitor) {
-  const container = byId("microphone-diagnostics");
+function renderGroupedCaptureSelect(catalog, selectedSources) {
+  const select = byId("capture-sources");
+  const selectedIds = new Set((selectedSources || []).map((source) => source.id));
+  const optionsSignature = (catalog || [])
+    .map((source) => `${source.groupLabel}::${source.id}::${source.kind}::${source.name}`)
+    .join("|");
+  const selectedSignature = Array.from(selectedIds).sort().join("|");
+  const groups = new Map();
+  const wasFocused = document.activeElement === select;
+  const previousScrollTop = select.scrollTop;
+
+  catalog.forEach((source) => {
+    const items = groups.get(source.groupLabel) || [];
+    items.push(source);
+    groups.set(source.groupLabel, items);
+  });
+
+  if (state.captureSourceRender.optionsSignature !== optionsSignature) {
+    select.innerHTML = "";
+    Array.from(groups.entries()).forEach(([label, sources]) => {
+      const group = document.createElement("optgroup");
+      group.label = label;
+      sources.forEach((source) => {
+        const option = document.createElement("option");
+        option.value = source.id;
+        option.selected = selectedIds.has(source.id);
+        option.textContent = source.name;
+        group.appendChild(option);
+      });
+      select.appendChild(group);
+    });
+  } else if (state.captureSourceRender.selectedSignature !== selectedSignature) {
+    Array.from(select.options).forEach((option) => {
+      option.selected = selectedIds.has(option.value);
+    });
+  }
+
+  state.captureSourceRender.optionsSignature = optionsSignature;
+  state.captureSourceRender.selectedSignature = selectedSignature;
+
+  if (wasFocused) {
+    select.scrollTop = previousScrollTop;
+  }
+}
+
+function renderSelectedSourcesSummary(selectedSources) {
+  const container = byId("selected-sources-summary");
   container.innerHTML = "";
 
-  const lines = [
-    `Provider: ${monitor.provider}`,
-    `Selected device: ${monitor.selectedDeviceName || "none"}`,
-    monitor.whisperCaptureId ? `Whisper capture id: ${monitor.whisperCaptureId}` : null,
-    `Probe status: ${monitor.probeStatus}`,
-    monitor.probeLastUpdatedAt ? `Last probe update: ${new Date(monitor.probeLastUpdatedAt).toLocaleTimeString()}` : null,
-    monitor.probeError ? `Probe error: ${monitor.probeError}` : null,
-    monitor.whisperLastError ? `Whisper error: ${monitor.whisperLastError}` : null,
-    ...(monitor.deviceDiagnostics || [])
-  ].filter(Boolean);
-
-  if (!lines.length) {
-    setEmptyState(container, "No microphone diagnostics yet.");
+  if (!selectedSources || selectedSources.length === 0) {
+    setEmptyState(container, "No sources selected.");
     return;
   }
 
   container.classList.remove("text-body-secondary");
-  lines.forEach((line) => {
-    const row = createPanelRow("");
-    row.textContent = line;
+  selectedSources.forEach((source) => {
+    const pill = document.createElement("span");
+    pill.className = `badge ${badgeClassForSource(source.kind)}`;
+    pill.textContent = source.name;
+    container.appendChild(pill);
+  });
+}
+
+function renderCaptureDiagnostics(monitors) {
+  const container = byId("capture-diagnostics");
+  container.innerHTML = "";
+  const items = Object.values(monitors || {});
+  if (!items.length) {
+    setEmptyState(container, "No capture diagnostics yet.");
+    return;
+  }
+
+  container.classList.remove("text-body-secondary");
+  items.forEach((monitor) => {
+    const row = createPanelRow(`
+      <div class="fw-semibold">${monitor.sourceName}</div>
+      <div>${monitor.sourceKind} · ${monitor.status}</div>
+      ${monitor.error ? `<div class="text-danger">${monitor.error}</div>` : ""}
+      ${monitor.lastUpdatedAt ? `<div class="text-body-secondary">Updated ${new Date(monitor.lastUpdatedAt).toLocaleTimeString()}</div>` : ""}
+      ${(monitor.deviceDiagnostics || []).length ? `<div class="text-body-secondary">${monitor.deviceDiagnostics.join(" · ")}</div>` : ""}
+    `);
     container.appendChild(row);
+  });
+}
+
+function renderSourceMonitors(monitors) {
+  const container = byId("live-source-monitors");
+  container.innerHTML = "";
+  const items = Object.values(monitors || {});
+  if (!items.length) {
+    setEmptyState(container, "No active source monitors.");
+    return;
+  }
+
+  container.classList.remove("text-body-secondary");
+  items.forEach((monitor) => {
+    const wrapper = document.createElement("div");
+    wrapper.className = "border rounded p-2 bg-body-tertiary";
+    const header = document.createElement("div");
+    header.className = "d-flex justify-content-between align-items-center gap-2";
+    header.innerHTML = `
+      <div>
+        <span class="fw-semibold">${monitor.sourceName}</span>
+        <span class="text-body-secondary"> · ${monitor.sourceKind}</span>
+      </div>
+      <span class="badge ${monitor.status === "running" ? "text-bg-success" : monitor.status === "error" ? "text-bg-danger" : "text-bg-secondary"}">${monitor.status}</span>
+    `;
+
+    const progress = document.createElement("div");
+    progress.className = "progress mt-2";
+    progress.innerHTML = `<div class="progress-bar" style="width: ${Math.round((monitor.level || 0) * 100)}%"></div>`;
+
+    wrapper.append(header, progress);
+    if (monitor.error) {
+      const error = document.createElement("div");
+      error.className = "small text-danger mt-2";
+      error.textContent = monitor.error;
+      wrapper.appendChild(error);
+    }
+    container.appendChild(wrapper);
   });
 }
 
@@ -639,62 +720,152 @@ function renderHistory(entries, targetId, resumable = false) {
   });
 }
 
-function fillSelect(select, options, selectedValue) {
+function fillSimpleSelect(select, options, selectedValue) {
   select.innerHTML = "";
   options.forEach((option) => {
     const el = document.createElement("option");
-    if (typeof option === "string") {
-      el.value = option;
-      el.textContent = option;
-    } else {
-      el.value = option.id;
-      el.textContent = option.name;
-    }
-    el.selected = el.value === (selectedValue ?? "");
+    el.value = option;
+    el.textContent = option;
+    el.selected = option === (selectedValue ?? "");
     select.appendChild(el);
   });
-  if (!options.length) {
-    const empty = document.createElement("option");
-    empty.value = "";
-    empty.textContent = "No devices";
-    select.appendChild(empty);
+}
+
+function fillMockSourceSelect(session) {
+  const select = byId("mock-source-id");
+  select.innerHTML = "";
+  const sources = session?.captureSources || [];
+  sources.forEach((source) => {
+    const option = document.createElement("option");
+    option.value = source.id;
+    option.textContent = source.name;
+    select.appendChild(option);
+  });
+}
+
+function permissionStateLabel(value) {
+  switch (value) {
+    case "granted":
+      return "granted";
+    case "denied":
+      return "denied";
+    case "not-determined":
+      return "not requested yet";
+    case "unavailable":
+      return "unavailable";
+    default:
+      return "unknown";
   }
 }
 
-function selectedMicrophoneName(data) {
-  if (data.microphoneMonitor?.selectedDeviceName) {
-    return data.microphoneMonitor.selectedDeviceName;
+function getPermissionRequirements(config, permissions) {
+  const selectedSources = config?.captureSources || [];
+  const needsMicrophone = selectedSources.some((source) => source.kind === "microphone" || source.kind === "loopback-input");
+  const needsSystemAudio = selectedSources.some((source) => source.kind === "system-mix" || source.kind === "native-display-audio" || source.kind === "native-app-audio");
+  const issues = [];
+
+  if (needsMicrophone && permissions.microphone !== "granted") {
+    issues.push(`Input access is ${permissionStateLabel(permissions.microphone)} for the selected microphone sources.`);
+  }
+  if (needsSystemAudio && permissions.systemAudio !== "granted") {
+    issues.push(`Screen/system-audio access is ${permissionStateLabel(permissions.systemAudio)} for the selected desktop-audio or advanced display/app sources.`);
   }
 
-  const selectedId = state.configDirty && state.configDraft
-    ? state.configDraft.microphoneId
-    : data.config.microphoneId;
+  return {
+    issues,
+    requiresAction: issues.length > 0,
+    isDenied: (needsMicrophone && permissions.microphone === "denied") || (needsSystemAudio && permissions.systemAudio === "denied")
+  };
+}
 
-  return data.microphones.find((microphone) => microphone.id === selectedId)?.name || "No microphone selected";
+function permissionSignature(config, permissions) {
+  return `${permissions.microphone}|${permissions.systemAudio}|${(config?.captureSources || []).map((source) => source.id).sort().join("|")}`;
+}
+
+function renderPermissionGuidance(config, permissions) {
+  const banner = byId("permission-guidance");
+  const text = byId("permission-guidance-text");
+  const button = byId("request-permissions");
+  const openSettingsButton = byId("open-privacy-settings");
+  const requirement = getPermissionRequirements(config, permissions);
+  const signature = permissionSignature(config, permissions);
+
+  if (!requirement.requiresAction || state.dismissedPermissionSignature === signature) {
+    banner.classList.add("d-none");
+    button.disabled = false;
+    openSettingsButton.disabled = false;
+    return;
+  }
+
+  const lines = [
+    ...requirement.issues,
+    requirement.isDenied
+      ? "If a request does not reopen the macOS prompt, enable access in System Settings > Privacy & Security and then start a fresh session."
+      : "Use the button below to request the missing permissions."
+  ];
+
+  text.innerHTML = lines.map((line) => `<div>${line}</div>`).join("");
+  button.disabled = false;
+  openSettingsButton.disabled = false;
+  banner.classList.remove("d-none");
+}
+
+function pickPrimaryMonitor(monitors) {
+  const items = Object.values(monitors || {});
+  if (!items.length) {
+    return null;
+  }
+
+  const running = items.filter((monitor) => monitor.status === "running");
+  const candidates = running.length ? running : items;
+  return candidates
+    .slice()
+    .sort((left, right) => {
+      const levelDelta = (right.level || 0) - (left.level || 0);
+      if (levelDelta !== 0) {
+        return levelDelta;
+      }
+
+      return (right.lastUpdatedAt || "").localeCompare(left.lastUpdatedAt || "");
+    })[0] || null;
+}
+
+function effectiveConfig(data) {
+  if (!state.configDirty || !state.configDraft) {
+    return data.config;
+  }
+
+  return {
+    ...data.config,
+    ...state.configDraft,
+    captureSources: state.configDraft.captureSources ?? data.config.captureSources
+  };
 }
 
 function renderConfig(data) {
-  const { config, runtime, microphones, microphonePermission, microphoneMonitor } = data;
-  const effectiveConfig = state.configDirty && state.configDraft
-    ? { ...config, ...state.configDraft }
-    : config;
+  const config = effectiveConfig(data);
 
-  byId("markdown-path").value = effectiveConfig.markdownFilePath || "";
-  fillSelect(byId("microphone-id"), microphones, effectiveConfig.microphoneId);
-  fillSelect(byId("stt-provider"), runtime.availableProviders.stt, effectiveConfig.sttProvider);
-  fillSelect(byId("analysis-provider"), runtime.availableProviders.analysis, effectiveConfig.analysisProvider);
-  byId("chunk-sensitivity").value = effectiveConfig.chunkSensitivity;
-  byId("analysis-threshold").value = String(effectiveConfig.analysisAutoApplyThreshold);
-  byId("analysis-threshold-label").textContent = `${Math.round(effectiveConfig.analysisAutoApplyThreshold * 100)}%`;
-  byId("permission-pill").textContent = `Mic: ${microphonePermission} ●`;
-  byId("permission-pill").className = `badge ${microphonePermission === "granted" ? "text-bg-light border text-success" : "text-bg-light border text-secondary"}`;
-  byId("permission-pill").title = selectedMicrophoneName(data);
-  byId("mic-level-bar").style.width = `${Math.round((microphoneMonitor?.level ?? 0) * 100)}%`;
-  byId("mic-level-bar").setAttribute("aria-valuenow", String(Math.round((microphoneMonitor?.level ?? 0) * 100)));
-  byId("mic-level-meta").textContent = microphoneMonitor?.probeStatus === "running"
-    ? `Probe active${microphoneMonitor.probeLastUpdatedAt ? ` · updated ${new Date(microphoneMonitor.probeLastUpdatedAt).toLocaleTimeString()}` : ""}`
-    : (microphoneMonitor?.probeError || "No probe data yet.");
-  renderMicrophoneDiagnostics(microphoneMonitor);
+  byId("markdown-path").value = config.markdownFilePath || "";
+  renderGroupedCaptureSelect(data.captureSourceCatalog || [], config.captureSources || []);
+  renderSelectedSourcesSummary(config.captureSources || []);
+  fillSimpleSelect(byId("stt-provider"), data.runtime.availableProviders.stt, config.sttProvider);
+  fillSimpleSelect(byId("analysis-provider"), data.runtime.availableProviders.analysis, config.analysisProvider);
+  byId("chunk-sensitivity").value = config.chunkSensitivity;
+  byId("analysis-threshold").value = String(config.analysisAutoApplyThreshold);
+  byId("analysis-threshold-label").textContent = `${Math.round(config.analysisAutoApplyThreshold * 100)}%`;
+
+  const permissions = data.capturePermissions;
+  const primaryMonitor = pickPrimaryMonitor(data.sourceMonitors);
+  byId("permission-pill").textContent = `Input: ${permissions.microphone} · Screen: ${permissions.systemAudio}`;
+  byId("permission-pill").className = `badge ${(permissions.microphone === "granted" || permissions.systemAudio === "granted") ? "text-bg-light border text-success" : "text-bg-light border text-secondary"}`;
+  byId("permission-pill").title = (config.captureSources || []).map((source) => source.name).join(", ") || "No sources selected";
+  byId("mic-level-bar").style.width = `${Math.round((primaryMonitor?.level ?? 0) * 100)}%`;
+  byId("mic-level-bar").setAttribute("aria-valuenow", String(Math.round((primaryMonitor?.level ?? 0) * 100)));
+  byId("mic-level-meta").textContent = primaryMonitor
+    ? `${primaryMonitor.sourceName} · ${primaryMonitor.status}${primaryMonitor.lastUpdatedAt ? ` · updated ${new Date(primaryMonitor.lastUpdatedAt).toLocaleTimeString()}` : ""}`
+    : "No source monitor data yet.";
+  renderCaptureDiagnostics(data.sourceMonitors);
+  renderPermissionGuidance(config, permissions);
 }
 
 function renderLive(data) {
@@ -707,49 +878,39 @@ function renderLive(data) {
   const permissionPill = byId("permission-pill");
   const sessionPill = byId("session-pill");
 
-  permissionPill.textContent = `Mic: ${data.microphonePermission} ●`;
-  permissionPill.className = `badge ${data.microphonePermission === "granted" ? "text-bg-light border text-success" : "text-bg-light border text-secondary"}`;
-  permissionPill.title = selectedMicrophoneName(data);
+  permissionPill.textContent = `Input: ${data.capturePermissions.microphone} · Screen: ${data.capturePermissions.systemAudio}`;
+  permissionPill.className = `badge ${(data.capturePermissions.microphone === "granted" || data.capturePermissions.systemAudio === "granted") ? "text-bg-light border text-success" : "text-bg-light border text-secondary"}`;
   sessionPill.textContent = session ? `Session: ${session.status} ●` : "No active session";
   sessionPill.className = `badge ${session ? "text-bg-light border text-primary" : "text-bg-light border text-secondary"}`;
   sessionPill.title = session ? session.id : "No active session";
+  renderPermissionGuidance(effectiveConfig(data), data.capturePermissions);
 
   if (!session) {
-    analyzeButton.classList.add("disabled");
-    analyzeButton.setAttribute("aria-disabled", "true");
     analyzeButton.disabled = true;
-    endButton.classList.add("disabled");
-    endButton.setAttribute("aria-disabled", "true");
     endButton.disabled = true;
-    endButton.textContent = "No active session";
-    undoButton.classList.add("disabled");
-    undoButton.setAttribute("aria-disabled", "true");
     undoButton.disabled = true;
     mockTranscriptButton.disabled = true;
     mockTranscriptCard.classList.add("d-none");
     byId("session-meta").textContent = "No active session.";
+    renderSourceMonitors(data.sourceMonitors);
     renderLiveMarkdown(data);
     return;
   }
 
-  analyzeButton.classList.remove("disabled");
-  analyzeButton.removeAttribute("aria-disabled");
   analyzeButton.disabled = false;
-  endButton.classList.remove("disabled");
-  endButton.removeAttribute("aria-disabled");
   endButton.disabled = false;
-  endButton.textContent = "End session";
-  undoButton.classList.remove("disabled");
-  undoButton.removeAttribute("aria-disabled");
   undoButton.disabled = false;
   mockTranscriptButton.disabled = false;
   mockTranscriptCard.classList.toggle("d-none", session.sttProvider !== "mock");
   byId("session-meta").textContent = [
     `Started ${formatRelativeFromNow(session.startedAt)}`,
     `Status ${session.status}`,
+    `${session.captureSources.length} source${session.captureSources.length === 1 ? "" : "s"}`,
     session.latestAnalysisAt ? `Last analysis ${formatRelativeFromNow(session.latestAnalysisAt)}` : null,
     session.lastError ? "Error present" : null
   ].filter(Boolean).join(" · ");
+  fillMockSourceSelect(session);
+  renderSourceMonitors(session.sourceMonitors);
   renderLiveMarkdown(data);
 }
 
@@ -797,12 +958,11 @@ function bindEvents() {
   byId("stt-provider").addEventListener("change", markConfigDirty);
   byId("analysis-provider").addEventListener("change", markConfigDirty);
   byId("chunk-sensitivity").addEventListener("change", markConfigDirty);
-
-  byId("microphone-id").addEventListener("change", async () => {
+  byId("capture-sources").addEventListener("change", async () => {
     markConfigDirty();
-
+    renderSelectedSourcesSummary(state.configDraft.captureSources);
     try {
-      await saveConfig({ microphoneId: byId("microphone-id").value || null });
+      await saveConfig({ captureSources: getSelectedCaptureSources() });
       await loadState();
     } catch (error) {
       showError(error.message);
@@ -820,6 +980,7 @@ function bindEvents() {
 
   byId("refresh-state").addEventListener("click", async () => {
     try {
+      state.dismissedPermissionSignature = null;
       await loadState();
     } catch (error) {
       showError(error.message);
@@ -848,11 +1009,14 @@ function bindEvents() {
 
   byId("end-session").addEventListener("click", async () => {
     try {
+      byId("end-session").disabled = true;
       await requestJson("/api/session/end", { method: "POST", body: JSON.stringify({ status: "finished" }) });
       setTab("history");
       await loadState();
     } catch (error) {
       showError(error.message);
+    } finally {
+      byId("end-session").disabled = false;
     }
   });
 
@@ -869,13 +1033,56 @@ function bindEvents() {
     try {
       await requestJson("/api/session/mock-transcript", {
         method: "POST",
-        body: JSON.stringify({ text: byId("mock-transcript").value })
+        body: JSON.stringify({
+          text: byId("mock-transcript").value,
+          sourceId: byId("mock-source-id").value || null
+        })
       });
       byId("mock-transcript").value = "";
       await loadState();
     } catch (error) {
       showError(error.message);
     }
+  });
+
+  byId("request-permissions").addEventListener("click", async () => {
+    try {
+      byId("request-permissions").disabled = true;
+      state.dismissedPermissionSignature = null;
+      const data = await requestJson("/api/permissions/request", { method: "POST" });
+      state.data = data;
+      renderConfig(data);
+      renderLive(data);
+      renderHistory(data.history, "history-list");
+      renderHistory(data.resumableSessions, "resume-list", true);
+      clearError();
+    } catch (error) {
+      showError(error.message);
+    } finally {
+      byId("request-permissions").disabled = false;
+    }
+  });
+
+  byId("open-privacy-settings").addEventListener("click", async () => {
+    try {
+      byId("open-privacy-settings").disabled = true;
+      await requestJson("/api/permissions/open-settings", { method: "POST" });
+    } catch (error) {
+      showError(error.message);
+    } finally {
+      byId("open-privacy-settings").disabled = false;
+    }
+  });
+
+  byId("dismiss-permission-guidance").addEventListener("click", () => {
+    const data = state.data;
+    if (!data) {
+      byId("permission-guidance").classList.add("d-none");
+      return;
+    }
+
+    state.dismissedPermissionSignature = permissionSignature(effectiveConfig(data), data.capturePermissions);
+    byId("permission-guidance").classList.add("d-none");
   });
 }
 

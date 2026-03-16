@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { createEmptyDisplayTranscript } from "../src/server/domain/transcript/display.js";
 import { parseTopicsMarkdown } from "../src/server/domain/topics/markdownParser.js";
 import { buildProposedMarkdown } from "../src/server/domain/topics/proposedMarkdown.js";
 import type { SessionSnapshot, TopicRecord } from "../src/server/domain/types.js";
@@ -30,14 +31,16 @@ function createSessionFromMarkdown(markdown: string): SessionSnapshot {
     endedAt: null,
     sttProvider: "mock",
     analysisProvider: "mock",
-    microphoneSelection: null,
+    captureSources: [],
     status: "active",
     latestTranscriptTail: [],
     visibleTranscriptEvents: [],
+    displayTranscript: createEmptyDisplayTranscript(),
     latestAnalysisAt: null,
     proposedMarkdownPath: "/tmp/proposed-final.md",
     liveTranscriptPath: "/tmp/live-transcript.txt",
     recordedAudioPath: null,
+    recordedAudioPaths: {},
     approximateTranscriptSrtPath: "/tmp/transcript.approx.srt",
     finalTranscriptSrtPath: null,
     chunkSensitivity: "medium",
@@ -57,7 +60,7 @@ function createSessionFromMarkdown(markdown: string): SessionSnapshot {
     pendingDecisions: [],
     actionHistory: [],
     passCount: 0,
-    microphoneLevel: 0,
+    sourceMonitors: {},
     lastError: null,
     resumeWarning: null
   };

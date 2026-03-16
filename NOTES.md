@@ -1,3 +1,3 @@
 # TODO
 
-* Progress/output of the installer
+* Testing (5 minute audio clip to replay?)

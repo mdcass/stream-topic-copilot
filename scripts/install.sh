@@ -10,6 +10,8 @@ PROBE_SRC="$ROOT_DIR/scripts/mic-level-probe.swift"
 PROBE_BIN="$BIN_DIR/mic-level-probe"
 SDL_HELPER_SRC="$ROOT_DIR/scripts/sdl-audio-devices.c"
 SDL_HELPER_BIN="$BIN_DIR/sdl-audio-devices"
+NATIVE_AUDIO_HELPER_SRC="$ROOT_DIR/scripts/native-system-audio-helper.swift"
+NATIVE_AUDIO_HELPER_BIN="$BIN_DIR/native-system-audio-helper"
 ENV_FILE="$ROOT_DIR/.env"
 MODEL_NAME="${1:-${WHISPER_MODEL_NAME:-small.en}}"
 MODEL_FILE="ggml-${MODEL_NAME}.bin"
@@ -50,21 +52,21 @@ set_env() {
   printf "%s=%s\n" "$key" "$value" >> "$ENV_FILE"
 }
 
-progress "1/8" "Preparing project directories"
+progress "1/9" "Preparing project directories"
 mkdir -p "$BIN_DIR" "$ROOT_DIR/data" "$ROOT_DIR/sessions" "$MODELS_DIR"
 
 if [ ! -d node_modules ]; then
-  progress "2/8" "Installing npm dependencies"
+  progress "2/9" "Installing npm dependencies"
   npm install
 else
-  progress "2/8" "npm dependencies already installed"
+  progress "2/9" "npm dependencies already installed"
 fi
 
 if [ ! -f .env ]; then
-  progress "3/8" "Creating .env from .env.example"
+  progress "3/9" "Creating .env from .env.example"
   cp .env.example .env
 else
-  progress "3/8" ".env already exists"
+  progress "3/9" ".env already exists"
 fi
 
 if ! command -v brew >/dev/null 2>&1; then
@@ -73,7 +75,7 @@ if ! command -v brew >/dev/null 2>&1; then
   exit 1
 fi
 
-progress "4/8" "Installing or locating whisper-cpp via Homebrew"
+progress "4/9" "Installing or locating whisper-cpp via Homebrew"
 if ! brew list whisper-cpp >/dev/null 2>&1; then
   brew install whisper-cpp
 else
@@ -101,21 +103,22 @@ if [ -z "$WHISPER_EXECUTABLE" ]; then
   exit 1
 fi
 
-progress "5/8" "Downloading Whisper model ${MODEL_NAME}"
+progress "5/9" "Downloading Whisper model ${MODEL_NAME}"
 if [ -f "$MODEL_PATH" ]; then
   echo "Model already exists at $MODEL_PATH"
 else
   curl -fL "$MODEL_URL" -o "$MODEL_PATH"
 fi
 
-progress "6/8" "Updating .env for Whisper provider"
+progress "6/9" "Updating .env for Whisper provider"
 set_env "PUBLIC_DIR" "./dist/ui"
 set_env "STT_PROVIDER" "whisper"
 set_env "STT_EXECUTABLE" "$WHISPER_EXECUTABLE"
 set_env "WHISPER_MODEL" "$MODEL_PATH"
 set_env "MIC_PROBE_HELPER" "$PROBE_BIN"
+set_env "NATIVE_SYSTEM_AUDIO_HELPER" "$NATIVE_AUDIO_HELPER_BIN"
 
-progress "7/8" "Building local microphone helper binaries"
+progress "7/9" "Building local microphone helper binaries"
 if command -v sdl2-config >/dev/null 2>&1; then
   cc "$SDL_HELPER_SRC" -o "$SDL_HELPER_BIN" $(sdl2-config --cflags --libs)
 else
@@ -130,7 +133,14 @@ else
   echo "swiftc not found; skipping microphone helper build."
 fi
 
-progress "8/8" "Requesting microphone permission"
+progress "8/9" "Building native system-audio helper"
+if command -v swiftc >/dev/null 2>&1; then
+  swiftc -parse-as-library "$NATIVE_AUDIO_HELPER_SRC" -framework ScreenCaptureKit -framework AVFoundation -framework CoreMedia -framework CoreGraphics -o "$NATIVE_AUDIO_HELPER_BIN"
+else
+  echo "swiftc not found; skipping native system-audio helper build."
+fi
+
+progress "9/9" "Requesting microphone permission"
 if [ -x "$HELPER_BIN" ]; then
   "$HELPER_BIN" request || true
 fi

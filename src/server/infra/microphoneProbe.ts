@@ -1,7 +1,7 @@
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { promisify } from "node:util";
 
-import type { MicrophoneDevice, RuntimeConfig } from "../domain/types.js";
+import type { CaptureSourceDescriptor, RuntimeConfig } from "../domain/types.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -41,16 +41,16 @@ export class MicrophoneProbe {
     }
   }
 
-  async annotateDevices(devices: MicrophoneDevice[]): Promise<MicrophoneDevice[]> {
+  async annotateDevices(devices: CaptureSourceDescriptor[]): Promise<CaptureSourceDescriptor[]> {
     const probeDevices = await this.listDevices();
     const probeIdByName = new Map(probeDevices.map((device) => [device.name, device.uniqueId]));
     return devices.map((device) => ({
       ...device,
-      probeId: probeIdByName.get(device.name)
+      probeId: device.transport === "input-device" ? probeIdByName.get(device.name) : undefined
     }));
   }
 
-  async start(device: MicrophoneDevice | null, handlers: ProbeHandlers): Promise<void> {
+  async start(device: CaptureSourceDescriptor | null, handlers: ProbeHandlers): Promise<void> {
     await this.stop();
 
     if (!device?.probeId) {

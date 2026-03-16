@@ -19,9 +19,18 @@
             <div class="d-flex flex-wrap gap-2">
               <span id="error-pill" class="badge text-bg-danger d-none">Connection error</span>
               <div id="live-tab-status" class="d-none flex-wrap gap-2">
-                <span id="permission-pill" class="badge text-bg-secondary">Mic: unknown</span>
+                <span id="permission-pill" class="badge text-bg-secondary">Input: unknown · Screen: unknown</span>
                 <span id="session-pill" class="badge text-bg-secondary">No active session</span>
               </div>
+            </div>
+          </div>
+
+          <div id="permission-guidance" class="alert alert-warning small py-2 px-3 d-none" role="alert">
+            <div id="permission-guidance-text">Additional permissions are required.</div>
+            <div class="d-flex flex-wrap gap-2 mt-2">
+              <button id="request-permissions" class="btn btn-sm btn-warning" type="button">Request missing permissions</button>
+              <button id="open-privacy-settings" class="btn btn-sm btn-outline-dark" type="button">Open Privacy Settings</button>
+              <button id="dismiss-permission-guidance" class="btn btn-sm btn-outline-secondary" type="button">Dismiss</button>
             </div>
           </div>
 
@@ -35,12 +44,16 @@
                     <input id="markdown-path" class="form-control form-control-sm" type="text" />
                   </div>
                   <div class="mb-3">
-                    <label class="form-label small" for="microphone-id">Microphone</label>
-                    <select id="microphone-id" class="form-select form-select-sm"></select>
+                    <label class="form-label small" for="capture-sources">Capture sources</label>
+                    <select id="capture-sources" class="form-select form-select-sm" multiple size="10"></select>
+                    <div class="form-text small">Desktop Audio captures system audio across all displays. Advanced app/display capture remains available for targeted debugging.</div>
                   </div>
                   <div class="mb-3">
-                    <label class="form-label small" for="mic-level-bar">Microphone activity</label>
-                    <div class="progress" role="progressbar" aria-label="Microphone activity">
+                    <div id="selected-sources-summary" class="d-flex flex-wrap gap-2 text-body-secondary small">No sources selected.</div>
+                  </div>
+                  <div class="mb-3">
+                    <label class="form-label small" for="mic-level-bar">Primary capture activity</label>
+                    <div class="progress" role="progressbar" aria-label="Primary capture activity">
                       <div id="mic-level-bar" class="progress-bar" style="width: 0%"></div>
                     </div>
                     <div id="mic-level-meta" class="form-text small">No probe data yet.</div>
@@ -76,8 +89,8 @@
 
               <div class="card">
                 <div class="card-body">
-                  <h2 class="h6 card-title">Microphone Diagnostics</h2>
-                  <div id="microphone-diagnostics" class="vstack gap-2 text-body-secondary small">No microphone diagnostics yet.</div>
+                  <h2 class="h6 card-title">Capture Diagnostics</h2>
+                  <div id="capture-diagnostics" class="vstack gap-2 text-body-secondary small">No capture diagnostics yet.</div>
                 </div>
               </div>
 
@@ -113,9 +126,20 @@
                 </div>
               </div>
 
+              <div class="card">
+                <div class="card-body">
+                  <h2 class="h6 card-title">Source Monitors</h2>
+                  <div id="live-source-monitors" class="vstack gap-2 text-body-secondary small">No active source monitors.</div>
+                </div>
+              </div>
+
               <div id="mock-transcript-card" class="card d-none">
                 <div class="card-body">
                   <h2 class="h6 card-title">Mock Transcript Input</h2>
+                  <div class="mb-3">
+                    <label class="form-label small" for="mock-source-id">Target source</label>
+                    <select id="mock-source-id" class="form-select form-select-sm"></select>
+                  </div>
                   <div class="mb-3">
                     <label class="form-label small" for="mock-transcript">Use this while running with the mock STT provider.</label>
                     <textarea id="mock-transcript" class="form-control form-control-sm" rows="4"></textarea>

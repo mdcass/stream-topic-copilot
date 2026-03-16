@@ -1,6 +1,12 @@
 {
   "markdownFilePath": "/Users/mike/Projects/stream-topic-copilot/data/sample-topics.md",
-  "microphoneId": "1",
+  "captureSources": [
+    {
+      "id": "system-mix:default",
+      "kind": "system-mix",
+      "name": "Desktop Audio"
+    }
+  ],
   "sttProvider": "whisper",
   "analysisProvider": "mock",
   "chunkSensitivity": "medium",
@@ -14,5 +20,6 @@
   "sessionResumePreference": "manual",
   "analysisAutoApplyThreshold": 0.8,
   "pollingIntervalMs": 2000,
-  "transcriptTailSize": 30
+  "transcriptTailSize": 30,
+  "microphoneId": "1"
 }

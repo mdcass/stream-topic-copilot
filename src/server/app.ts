@@ -25,6 +25,22 @@ export function createApp(service: AppService, publicDir: string, sessionsDir: s
     }
   });
 
+  app.post("/api/permissions/request", async (_request, response) => {
+    try {
+      response.json(await service.requestRelevantPermissions());
+    } catch (error) {
+      response.status(400).json({ error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
+  app.post("/api/permissions/open-settings", async (_request, response) => {
+    try {
+      response.json(await service.openRelevantPrivacySettings());
+    } catch (error) {
+      response.status(400).json({ error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
   app.post("/api/session/start", async (_request, response) => {
     try {
       response.json({ session: await service.startSession() });
@@ -78,7 +94,7 @@ export function createApp(service: AppService, publicDir: string, sessionsDir: s
 
   app.post("/api/session/mock-transcript", async (request, response) => {
     try {
-      response.json({ session: await service.injectMockTranscript(request.body.text) });
+      response.json({ session: await service.injectMockTranscript(request.body.text, request.body.sourceId) });
     } catch (error) {
       response.status(400).json({ error: error instanceof Error ? error.message : String(error) });
     }
