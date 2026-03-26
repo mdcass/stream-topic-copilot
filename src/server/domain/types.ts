@@ -246,6 +246,7 @@ export interface RevisitableThemeRecord {
   label: string;
   summary: string;
   supportingMoments: string[];
+  interviewerQuestions: string[];
   confidence: number;
   rationale: string;
   sourceChunkIds: string[];

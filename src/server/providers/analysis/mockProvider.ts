@@ -66,6 +66,10 @@ function buildMockResponse(input: AnalysisRunInput): CodexAnalysisResponse {
         label: "General stream banter",
         summary: "The session drifted into broader chatter outside the prepared topic plan.",
         supportingMoments: [excerpt],
+        interviewerQuestions: [
+          "What part of that tangent felt unexpectedly worth coming back to later?",
+          "If you had to turn that side thread into a fuller story, where would you start?"
+        ],
         confidence: 0.56,
         rationale: "A lightweight revisitable theme helps the app remember non-topic discussion.",
         evidence: [{ chunkId: input.chunk.id, excerpt }],

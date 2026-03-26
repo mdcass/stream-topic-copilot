@@ -35,6 +35,7 @@ const revisitableThemeUpsertSchema = z.object({
   label: z.string().min(1),
   summary: z.string().min(1),
   supportingMoments: z.array(z.string().min(1)),
+  interviewerQuestions: z.array(z.string().min(1)).max(2),
   confidence: z.number().min(0).max(1),
   rationale: z.string().min(1),
   evidence: z.array(evidenceSchema).min(1),

@@ -812,6 +812,25 @@ function createThemeRow(theme) {
     wrapper.appendChild(moments);
   }
 
+  if ((theme.interviewerQuestions || []).length) {
+    const prompts = document.createElement("div");
+    prompts.className = "small mt-2";
+
+    const label = document.createElement("div");
+    label.className = "text-body-secondary mb-1";
+    label.textContent = "Elaboration prompts";
+    prompts.appendChild(label);
+
+    theme.interviewerQuestions.slice(0, 2).forEach((question) => {
+      const line = document.createElement("div");
+      line.className = "border rounded px-2 py-1 bg-body mb-1 text-body-emphasis";
+      line.textContent = question;
+      prompts.appendChild(line);
+    });
+
+    wrapper.appendChild(prompts);
+  }
+
   const actions = document.createElement("div");
   actions.className = "d-flex gap-2 mt-2";
 

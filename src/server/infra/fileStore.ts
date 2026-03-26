@@ -235,6 +235,16 @@ function normalizeLoadedSession(raw: Record<string, unknown>): SessionSnapshot {
   session.sessionSummary ??= createEmptySessionSummary();
   session.revisitableThemes ??= [];
   session.sessionRecap ??= createEmptySessionRecap();
+  session.revisitableThemes = session.revisitableThemes.map((theme) => {
+    const interviewerQuestions = Array.isArray(theme.interviewerQuestions)
+      ? theme.interviewerQuestions.filter((entry): entry is string => typeof entry === "string")
+      : [];
+
+    return {
+      ...theme,
+      interviewerQuestions
+    };
+  });
   session.sourceMonitors ??= Object.fromEntries(
     session.captureSources.map((source) => [source.id, {
       sourceId: source.id,

@@ -175,6 +175,7 @@ describe("analysis prompt builder", () => {
       label: "Build frustration",
       summary: "The streamer kept circling back to cooling frustration outside the formal plan.",
       supportingMoments: ["Cooling regret kept interrupting the story."],
+      interviewerQuestions: ["What made that cooling frustration stick with you after the moment passed?"],
       confidence: 0.84,
       rationale: "This theme may be worth revisiting later.",
       sourceChunkIds: ["chunk_000"],
@@ -221,5 +222,6 @@ describe("analysis prompt builder", () => {
     expect(prompt).toContain("Rolling session summary");
     expect(prompt).toContain("Build frustration");
     expect(prompt).toContain("Revisitable themes eligible for revival");
+    expect(prompt).toContain("interviewerQuestions");
   });
 });

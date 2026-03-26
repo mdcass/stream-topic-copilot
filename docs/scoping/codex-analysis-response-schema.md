@@ -78,6 +78,10 @@ It is the canonical schema companion to the PRD. Product requirements remain in 
         "supportingMoments": [
           "The cooling issue sounded more annoying than expected."
         ],
+        "interviewerQuestions": [
+          "What part of that cooling issue kept nagging at you after the moment passed?",
+          "If you had to explain why that tradeoff mattered, where would you start?"
+        ],
         "confidence": 0.76,
         "rationale": "This is a durable off-topic theme worth resurfacing later in the session.",
         "evidence": [
@@ -146,6 +150,7 @@ type RevisitableThemeUpsert = {
   label: string;
   summary: string;
   supportingMoments: string[];
+  interviewerQuestions: string[];
   confidence: number;
   rationale: string;
   evidence: Evidence[];
@@ -204,6 +209,7 @@ type Warning = {
 - `revisitableThemes` contains model-managed deltas for durable, session-local off-topic themes.
 - `revisitableThemes.upserts[].themeId` should reference an existing session theme when updating and use `null` when proposing a new theme.
 - `revisitableThemes.merges` lets the model collapse duplicate themes into an existing session theme id.
+- `revisitableThemes.upserts[].interviewerQuestions` may contain up to 2 concrete open-ended follow-up questions for elaborating on that theme.
 - Evidence is chunk-level only in V1. It must reference a `chunkId` and include a short `excerpt`.
 - Transport metadata such as timestamps, prompt version, model name, and raw CLI details belong in logs, not in this response payload.
 - `Warning.topicId` is always present in the payload. Use `null` when the warning is not topic-specific.

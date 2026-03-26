@@ -221,6 +221,7 @@
         "label",
         "summary",
         "supportingMoments",
+        "interviewerQuestions",
         "confidence",
         "rationale",
         "evidence",
@@ -243,6 +244,14 @@
         },
         "supportingMoments": {
           "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "interviewerQuestions": {
+          "type": "array",
+          "maxItems": 2,
           "items": {
             "type": "string",
             "minLength": 1

@@ -2,9 +2,9 @@
   "markdownFilePath": "/Users/mike/Projects/stream-topic-copilot/data/2026-03-26.md",
   "captureSources": [
     {
-      "id": "3",
+      "id": "1",
       "kind": "microphone",
-      "name": "Stealth 600X Gen 3"
+      "name": "USB Condenser Microphone"
     }
   ],
   "sttProvider": "whisper",

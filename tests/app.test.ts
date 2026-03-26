@@ -411,6 +411,75 @@ describe("app session flow", () => {
     expect(dismissResponse.body.session.livePrompts.find((prompt: { id: string; }) => prompt.id === promptId).dismissedAt).toBeTruthy();
   });
 
+  it("stores interviewer-style elaboration questions on revisitable themes", async () => {
+    const runtimeConfig = await createRuntimeConfig();
+    runtimeConfig.chunkWordThreshold = 1;
+    runtimeConfig.chunkTimeThresholdSeconds = 1;
+    const service = new AppService(
+      runtimeConfig,
+      new Map([["mock", new MockSttProvider()]]),
+      new Map([["scripted", new ScriptedAnalysisProvider(async (input) => ({
+        response: {
+          schemaVersion: "codexAnalysis.v1",
+          chunkId: input.chunk.id,
+          topicDecisions: [],
+          suggestions: {
+            activeTopics: [],
+            elaborationStarters: [],
+            adjacentNextTopics: [],
+            recoveryPrompts: []
+          },
+          offTopicObservations: [],
+          revisitableThemes: {
+            upserts: [{
+              themeId: null,
+              label: "Cooling frustration",
+              summary: "The streamer kept circling back to the cooling tradeoff outside the prepared plan.",
+              supportingMoments: ["The cooling setup kept sounding more annoying than expected."],
+              interviewerQuestions: [
+                "What part of that cooling issue kept sticking in your head after the moment passed?",
+                "If you had to explain why that tradeoff mattered, where would you start?"
+              ],
+              confidence: 0.88,
+              rationale: "This is a durable off-topic theme worth resurfacing later.",
+              evidence: [{ chunkId: input.chunk.id, excerpt: input.chunk.text }],
+              promptEligible: true
+            }],
+            merges: []
+          },
+          warnings: []
+        },
+        rawResponse: input.chunk.text,
+        latencyMs: 1
+      }))]])
+    );
+    await service.initialize();
+    const app = createApp(service, runtimeConfig.publicDir, runtimeConfig.sessionsDir, process.cwd());
+
+    await request(app)
+      .post("/api/config")
+      .send({
+        captureSources: [{
+          id: "mock-mic-default",
+          kind: "microphone",
+          name: "Mock Studio Mic"
+        }],
+        analysisProvider: "scripted"
+      })
+      .expect(200);
+
+    await request(app).post("/api/session/start").expect(200);
+
+    const response = await request(app)
+      .post("/api/session/mock-transcript")
+      .send({ text: "The cooling setup should have been simple, but it kept annoying me in ways I didn't expect." })
+      .expect(200);
+
+    expect(response.body.session.revisitableThemes).toHaveLength(1);
+    expect(response.body.session.revisitableThemes[0].interviewerQuestions).toHaveLength(2);
+    expect(response.body.session.revisitableThemes[0].interviewerQuestions[0]).toContain("cooling issue");
+  });
+
   it("promotes an analysis-marked partial parent to covered when child beats complete it", async () => {
     const runtimeConfig = await createRuntimeConfig();
     runtimeConfig.chunkWordThreshold = 1;

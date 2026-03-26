@@ -1764,6 +1764,7 @@ export class AppService {
         label: upsert.label,
         summary: upsert.summary,
         supportingMoments: [],
+        interviewerQuestions: [],
         confidence: upsert.confidence,
         rationale: upsert.rationale,
         sourceChunkIds: [],
@@ -1788,6 +1789,7 @@ export class AppService {
         ],
         MAX_THEME_MOMENTS
       );
+      theme.interviewerQuestions = uniqueStrings(upsert.interviewerQuestions, 2);
       theme.confidence = upsert.confidence;
       theme.rationale = upsert.rationale;
       theme.sourceChunkIds = uniqueStrings(

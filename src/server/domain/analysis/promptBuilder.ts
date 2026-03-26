@@ -16,6 +16,7 @@ function compactTheme(theme: SessionSnapshot["revisitableThemes"][number]): Reco
     label: theme.label,
     summary: theme.summary,
     supportingMoments: theme.supportingMoments,
+    interviewerQuestions: theme.interviewerQuestions,
     confidence: theme.confidence,
     status: theme.status,
     promptEligible: theme.promptEligible,
@@ -104,6 +105,8 @@ export function buildAnalysisPrompt(session: SessionSnapshot, chunk: TranscriptC
     "- revisitableThemes should upsert or merge durable off-topic themes worth resurfacing later in this session.",
     "- revisitableThemes.themeId should reference an existing theme when updating; use null to propose a new theme.",
     "- revisitableThemes.supportingMoments should stay concise and selective, not become a transcript dump.",
+    "- revisitableThemes.interviewerQuestions should contain 0 to 2 concrete open-ended questions a streamer could answer to elaborate on that theme.",
+    "- interviewerQuestions should feel like a good interviewer prompt, not a label rewrite or generic filler.",
     "- Every decision and suggestion needs evidence from this chunk.",
     "- Transcript lines may include source tags like [Mock Studio Mic] or [Discord]; use them to distinguish streamer vs system audio evidence."
   ].join("\n");
