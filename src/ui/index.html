@@ -5,9 +5,56 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <link rel="icon" href="data:," />
     <title>Stream Topic Copilot</title>
+    <style>
+      :root {
+        --transcript-footer-line-height: 1.15rem;
+        --transcript-footer-visible-lines: 5;
+        --transcript-footer-pane-height: calc(var(--transcript-footer-line-height) * var(--transcript-footer-visible-lines) + 0.75rem);
+        --transcript-footer-reserved-space: calc(var(--transcript-footer-pane-height) + 2rem + env(safe-area-inset-bottom, 0px));
+      }
+
+      #app-shell.transcript-footer-active {
+        padding-bottom: calc(var(--transcript-footer-reserved-space) + 0.75rem);
+      }
+
+      #transcript-footer-shell {
+        position: fixed;
+        inset-inline: 0;
+        bottom: 0;
+        z-index: 1030;
+        padding-bottom: calc(0.75rem + env(safe-area-inset-bottom, 0px));
+      }
+
+      #transcript-footer-shell .transcript-footer-column {
+        pointer-events: none;
+      }
+
+      #transcript-footer-shell .transcript-footer-card {
+        pointer-events: auto;
+        box-shadow: 0 -0.5rem 1rem rgba(33, 37, 41, 0.08);
+      }
+
+      #live-transcript-pane {
+        height: var(--transcript-footer-pane-height);
+        overflow: auto;
+        padding: 0.375rem 0.5rem;
+        font-size: 0.875rem;
+        line-height: var(--transcript-footer-line-height);
+        overscroll-behavior: contain;
+      }
+
+      .transcript-footer-row {
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+
+      .transcript-footer-row + .transcript-footer-row {
+        margin-top: 0.125rem;
+      }
+    </style>
   </head>
   <body class="bg-body-tertiary">
-    <main class="container py-3">
+    <main id="app-shell" class="container py-3">
       <div class="row justify-content-center">
         <div class="col-12 col-xl-5">
           <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-3">
@@ -130,12 +177,6 @@
               </div>
 
               <div class="card">
-                <div class="card-body p-0">
-                  <div id="live-transcript-pane" class="hljs small font-monospace p-3 mb-0 overflow-auto" style="max-height: 300px;"></div>
-                </div>
-              </div>
-
-              <div class="card">
                 <div class="card-body">
                   <h2 class="h6 card-title">Source Monitors</h2>
                   <div id="live-source-monitors" class="vstack gap-2 text-body-secondary small">No active source monitors.</div>
@@ -170,6 +211,20 @@
         </div>
       </div>
     </main>
+
+    <div id="transcript-footer-shell" class="d-none" aria-live="polite">
+      <div class="container">
+        <div class="row justify-content-center">
+          <div class="col-12 col-xl-5 transcript-footer-column">
+            <div class="card transcript-footer-card">
+              <div class="card-body p-0">
+                <div id="live-transcript-pane" class="text-body-emphasis"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
 
     <script type="module" src="/main.js"></script>
   </body>

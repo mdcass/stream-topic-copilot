@@ -19,6 +19,7 @@ const state = {
     keys: new Set(),
     textByKey: new Map()
   },
+  transcriptAutoFollow: true,
   captureSourceRender: {
     optionsSignature: "",
     selectedSignature: ""
@@ -29,6 +30,7 @@ const state = {
 const topicStates = ["pending", "partial", "covered", "snoozed", "dismissed"];
 const completedTopicCleanupMs = 60_000;
 const minimumVisiblePromptConfidence = 0.75;
+const transcriptFollowTolerancePx = 12;
 const livePromptPresentation = {
   active: { icon: "🎯", label: "Focus", badgeClass: "text-bg-primary" },
   elaboration: { icon: "🗣️", label: "Say", badgeClass: "text-bg-success" },
@@ -569,7 +571,7 @@ function buildTranscriptDisplayRows(session) {
   return [
     ...displayTranscript.committedLines,
     ...(displayTranscript.activeLine ? [displayTranscript.activeLine] : [])
-  ];
+  ].filter((line) => !line.muted && line.text.trim());
 }
 
 function animateTranscriptRow(row, mode = "insert") {
@@ -608,46 +610,38 @@ function badgeClassForSource(kind) {
   }
 }
 
-function createTranscriptRow(line, session) {
+function createTranscriptRow(line) {
   const row = document.createElement("div");
-  row.className = "d-flex gap-2 align-items-start py-1";
-
-  const time = document.createElement("div");
-  time.className = "text-body-secondary flex-shrink-0";
-  time.style.minWidth = "4.5rem";
-  time.textContent = formatSessionOffset(session.startedAt, line.timestamp);
-
-  const body = document.createElement("div");
-  body.className = "d-flex gap-2 align-items-start flex-wrap";
-
-  const badge = document.createElement("span");
-  badge.className = `badge ${badgeClassForSource(line.sourceKind)}`;
-  badge.textContent = line.sourceName;
-
-  const text = document.createElement("div");
-  text.className = line.muted ? "text-body-secondary fst-italic" : "text-body-emphasis";
-  text.style.whiteSpace = "pre-wrap";
-  text.textContent = line.text;
-
-  body.append(badge, text);
-  row.append(time, body);
+  row.className = "transcript-footer-row";
+  row.textContent = line.text;
   return row;
+}
+
+function transcriptDistanceFromBottom(container) {
+  return Math.max(0, container.scrollHeight - container.clientHeight - container.scrollTop);
+}
+
+function isTranscriptAtBottom(container) {
+  return transcriptDistanceFromBottom(container) <= transcriptFollowTolerancePx;
+}
+
+function setTranscriptFooterVisibility(visible) {
+  byId("app-shell").classList.toggle("transcript-footer-active", visible);
+  byId("transcript-footer-shell").classList.toggle("d-none", !visible);
+  if (!visible) {
+    state.transcriptAutoFollow = true;
+  }
 }
 
 function renderTranscriptPane(session) {
   const container = byId("live-transcript-pane");
+  const previousDistanceFromBottom = transcriptDistanceFromBottom(container);
+  const shouldFollow = state.transcriptAutoFollow || previousDistanceFromBottom <= transcriptFollowTolerancePx;
+
+  setTranscriptFooterVisibility(Boolean(session));
   container.innerHTML = "";
 
-  const heading = document.createElement("div");
-  heading.className = "mb-2";
-  heading.innerHTML = highlightMarkdownLine("## Transcript");
-  container.appendChild(heading);
-
   if (!session) {
-    const empty = document.createElement("div");
-    empty.className = "text-body-secondary";
-    empty.textContent = "No active session";
-    container.appendChild(empty);
     state.transcriptRender = {
       keys: new Set(),
       textByKey: new Map()
@@ -660,7 +654,7 @@ function renderTranscriptPane(session) {
   if (!transcriptLines.length) {
     const empty = document.createElement("div");
     empty.className = "text-body-secondary";
-    empty.textContent = "No transcript captured yet.";
+    empty.textContent = "Waiting for transcript...";
     container.appendChild(empty);
     state.transcriptRender = {
       keys: new Set(),
@@ -672,7 +666,7 @@ function renderTranscriptPane(session) {
   const previousKeys = state.transcriptRender.keys;
 
   transcriptLines.forEach((line) => {
-    const row = createTranscriptRow(line, session);
+    const row = createTranscriptRow(line);
     container.appendChild(row);
     if (!previousKeys.has(line.key)) {
       animateTranscriptRow(row);
@@ -689,7 +683,14 @@ function renderTranscriptPane(session) {
     keys: new Set(transcriptLines.map((line) => line.key)),
     textByKey: new Map(transcriptLines.map((line) => [line.key, line.text]))
   };
-  container.scrollTop = container.scrollHeight;
+
+  if (shouldFollow) {
+    container.scrollTop = container.scrollHeight;
+    state.transcriptAutoFollow = true;
+    return;
+  }
+
+  container.scrollTop = Math.max(0, container.scrollHeight - container.clientHeight - previousDistanceFromBottom);
 }
 
 function renderLiveMarkdown(data) {
@@ -1417,6 +1418,10 @@ function bindEvents() {
 
     state.dismissedPermissionSignature = permissionSignature(effectiveConfig(data), data.capturePermissions);
     byId("permission-guidance").classList.add("d-none");
+  });
+
+  byId("live-transcript-pane").addEventListener("scroll", (event) => {
+    state.transcriptAutoFollow = isTranscriptAtBottom(event.currentTarget);
   });
 }
 

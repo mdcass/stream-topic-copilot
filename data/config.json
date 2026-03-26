@@ -1,10 +1,10 @@
 {
-  "markdownFilePath": "/Users/mike/Projects/stream-topic-copilot/data/2026-03-20.md",
+  "markdownFilePath": "/Users/mike/Projects/stream-topic-copilot/data/2026-03-26.md",
   "captureSources": [
     {
-      "id": "2",
+      "id": "3",
       "kind": "microphone",
-      "name": "BOYALINK"
+      "name": "Stealth 600X Gen 3"
     }
   ],
   "sttProvider": "whisper",
