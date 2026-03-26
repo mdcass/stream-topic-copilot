@@ -1,0 +1,18 @@
+{
+  "markdownFilePath": "./sample-topics.md",
+  "captureSources": [],
+  "sttProvider": "mock",
+  "analysisProvider": "mock",
+  "chunkSensitivity": "medium",
+  "visibleSuggestionCounts": {
+    "activeTopics": 3,
+    "elaborationStarters": 3,
+    "adjacentNextTopics": 3,
+    "recoveryPrompts": 3,
+    "offTopicObservations": 3
+  },
+  "sessionResumePreference": "manual",
+  "analysisAutoApplyThreshold": 0.8,
+  "pollingIntervalMs": 2000,
+  "transcriptTailSize": 30
+}

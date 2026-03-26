@@ -15,7 +15,9 @@
     "build:server": "tsc -p tsconfig.json",
     "start": "node dist/src/server/index.js",
     "doctor:audio": "tsx src/server/tools/audioDoctor.ts --json",
+    "session:latest": "tsx src/server/tools/latestSessionContext.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json",
+    "verify": "npm run typecheck && npm run test",
     "test": "vitest run",
     "test:watch": "vitest"
   },

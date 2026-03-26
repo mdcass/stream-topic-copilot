@@ -170,7 +170,7 @@ if (result.recommendedSource) {
 }
 
 if (result.appliedConfig) {
-  console.log("Updated config.json to select the recommended Desktop Audio source.");
+  console.log("Updated the local config to select the recommended Desktop Audio source.");
 }
 
 const failures = result.checks.filter((check) => check.status === "fail");

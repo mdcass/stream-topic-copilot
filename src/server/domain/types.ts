@@ -60,6 +60,7 @@ export interface RuntimeConfig {
   dataDir: string;
   sessionsDir: string;
   publicDir: string;
+  defaultConfigPath: string;
   configPath: string;
   analysisProvider: string;
   sttProvider: string;

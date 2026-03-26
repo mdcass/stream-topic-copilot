@@ -24,7 +24,8 @@ async function createRuntimeConfig(): Promise<RuntimeConfig> {
     dataDir,
     sessionsDir,
     publicDir: path.resolve("src/ui"),
-    configPath: path.join(dataDir, "config.json"),
+    defaultConfigPath: path.join(rootDir, "data/config.default.json"),
+    configPath: path.join(rootDir, "data/config.local.json"),
     analysisProvider: "mock",
     sttProvider: "mock",
     analysisProviderCommand: "codex exec --skip-git-repo-check --color never",
@@ -53,6 +54,89 @@ afterEach(async () => {
 });
 
 describe("file store migrations", () => {
+  it("uses committed defaults until a local config override exists", async () => {
+    const runtimeConfig = await createRuntimeConfig();
+    const fileStore = new FileStore(runtimeConfig);
+    await fileStore.ensureProjectDirs();
+    await fs.writeFile(runtimeConfig.defaultConfigPath, JSON.stringify({
+      markdownFilePath: "./sample-topics.md",
+      captureSources: [],
+      sttProvider: "mock",
+      analysisProvider: "mock",
+      chunkSensitivity: "high",
+      visibleSuggestionCounts: {
+        activeTopics: 2,
+        elaborationStarters: 2,
+        adjacentNextTopics: 2,
+        recoveryPrompts: 2,
+        offTopicObservations: 2
+      },
+      sessionResumePreference: "latest",
+      analysisAutoApplyThreshold: 0.6,
+      pollingIntervalMs: 1500,
+      transcriptTailSize: 12
+    }, null, 2));
+
+    const defaultConfig: AppConfig = {
+      markdownFilePath: path.join(runtimeConfig.dataDir, "sample-topics.md"),
+      captureSources: [],
+      sttProvider: "mock",
+      analysisProvider: "mock",
+      chunkSensitivity: "medium",
+      visibleSuggestionCounts: {
+        activeTopics: 3,
+        elaborationStarters: 3,
+        adjacentNextTopics: 3,
+        recoveryPrompts: 3,
+        offTopicObservations: 3
+      },
+      sessionResumePreference: "manual",
+      analysisAutoApplyThreshold: 0.8,
+      pollingIntervalMs: 2000,
+      transcriptTailSize: 30
+    };
+
+    const fromDefaults = await fileStore.loadConfig(defaultConfig);
+    expect(fromDefaults.markdownFilePath).toBe(path.join(runtimeConfig.dataDir, "sample-topics.md"));
+    expect(fromDefaults.chunkSensitivity).toBe("high");
+    expect(fromDefaults.sessionResumePreference).toBe("latest");
+    expect(await fileStore.exists(runtimeConfig.configPath)).toBe(false);
+
+    await fs.writeFile(runtimeConfig.configPath, JSON.stringify({
+      markdownFilePath: "./operator-topics.md",
+      captureSources: [{
+        id: "desk-mic",
+        kind: "microphone",
+        name: "Desk Mic"
+      }],
+      sttProvider: "whisper",
+      analysisProvider: "codex",
+      chunkSensitivity: "low",
+      visibleSuggestionCounts: {
+        activeTopics: 4,
+        elaborationStarters: 4,
+        adjacentNextTopics: 4,
+        recoveryPrompts: 4,
+        offTopicObservations: 4
+      },
+      sessionResumePreference: "manual",
+      analysisAutoApplyThreshold: 0.9,
+      pollingIntervalMs: 2500,
+      transcriptTailSize: 40
+    }, null, 2));
+
+    const fromLocalOverride = await fileStore.loadConfig(defaultConfig);
+    expect(fromLocalOverride.markdownFilePath).toBe(path.join(runtimeConfig.dataDir, "operator-topics.md"));
+    expect(fromLocalOverride.captureSources).toEqual([{
+      id: "desk-mic",
+      kind: "microphone",
+      name: "Desk Mic"
+    }]);
+    expect(fromLocalOverride.sttProvider).toBe("whisper");
+    expect(fromLocalOverride.analysisProvider).toBe("codex");
+    expect(fromLocalOverride.chunkSensitivity).toBe("low");
+  });
+
   it("migrates legacy microphoneId config into captureSources", async () => {
     const runtimeConfig = await createRuntimeConfig();
     const fileStore = new FileStore(runtimeConfig);

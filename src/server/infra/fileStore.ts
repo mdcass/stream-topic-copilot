@@ -30,19 +30,27 @@ export class FileStore {
 
   async loadConfig(defaultConfig: AppConfig): Promise<AppConfig> {
     await this.ensureProjectDirs();
+    let config = defaultConfig;
 
-    try {
-      const content = await fs.readFile(this.runtimeConfig.configPath, "utf8");
-      return normalizeLoadedConfig(defaultConfig, JSON.parse(content));
-    } catch (error) {
-      await this.saveConfig(defaultConfig);
-      return defaultConfig;
-    }
+    config = await this.loadConfigLayer(this.runtimeConfig.defaultConfigPath, config);
+    config = await this.loadConfigLayer(this.runtimeConfig.configPath, config);
+
+    return config;
   }
 
   async saveConfig(config: AppConfig): Promise<void> {
     await this.ensureProjectDirs();
+    await ensureDir(path.dirname(this.runtimeConfig.configPath));
     await fs.writeFile(this.runtimeConfig.configPath, JSON.stringify(config, null, 2));
+  }
+
+  private async loadConfigLayer(target: string, fallback: AppConfig): Promise<AppConfig> {
+    try {
+      const content = await fs.readFile(target, "utf8");
+      return normalizeLoadedConfig(fallback, JSON.parse(content), path.dirname(target));
+    } catch (error) {
+      return fallback;
+    }
   }
 
   sessionDir(sessionId: string): string {
@@ -215,12 +223,20 @@ function normalizeCaptureSources(value: unknown, fallbackMicrophoneId?: string |
   return [];
 }
 
-function normalizeLoadedConfig(defaultConfig: AppConfig, raw: Record<string, unknown>): AppConfig {
-  return {
+function normalizeLoadedConfig(defaultConfig: AppConfig, raw: Record<string, unknown>, configDir: string): AppConfig {
+  const normalized = {
     ...defaultConfig,
     ...raw,
     captureSources: normalizeCaptureSources(raw.captureSources, typeof raw.microphoneId === "string" ? raw.microphoneId : null)
   } as AppConfig;
+
+  if (typeof raw.markdownFilePath === "string" && raw.markdownFilePath.trim().length > 0) {
+    normalized.markdownFilePath = path.isAbsolute(raw.markdownFilePath)
+      ? raw.markdownFilePath
+      : path.resolve(configDir, raw.markdownFilePath);
+  }
+
+  return normalized;
 }
 
 function normalizeLoadedSession(raw: Record<string, unknown>): SessionSnapshot {
