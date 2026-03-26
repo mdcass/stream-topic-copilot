@@ -175,6 +175,8 @@ Per-session outputs are written to:
 sessions/<session-id>/
   session.json
   session-summary.json
+  session-recap.json
+  session-recap.md
   source-topics.md
   proposed-final.md
   live-transcript.txt
@@ -192,6 +194,7 @@ Notes:
 
 - `transcript.approx.srt` is generated from the app’s internal chunk timing and is always available after session end.
 - `transcript.final.srt` is generated from the saved Whisper WAV via `whisper-cli` when the final post-pass succeeds.
+- `session-recap.json` and `session-recap.md` are generated at session end from the accumulated summary, revisitable themes, and transcript chunks.
 
 ## Runbook
 
@@ -209,6 +212,7 @@ Notes:
 - Topic buttons let you set `partial`, `covered`, `snoozed`, or `dismissed`.
 - `Undo` reverts the most recent direct state change.
 - The UI polls `/api/state` and refreshes transcript tail, suggestions, warnings, and topic state.
+- The Live tab now includes a rolling session summary plus revisitable off-topic themes with pin/dismiss controls.
 - The transcript card now renders finalized chunks in an SRT-like format for easier reading during the session.
 
 ### Ending a session

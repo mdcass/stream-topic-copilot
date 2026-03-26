@@ -109,6 +109,38 @@ export function createApp(service: AppService, publicDir: string, sessionsDir: s
     }
   });
 
+  app.post("/api/session/live-prompt/dismiss", async (request, response) => {
+    try {
+      response.json({ session: await service.dismissLivePrompt(request.body.promptId) });
+    } catch (error) {
+      response.status(400).json({ error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
+  app.post("/api/session/theme/dismiss", async (request, response) => {
+    try {
+      response.json({ session: await service.dismissRevisitableTheme(request.body.themeId) });
+    } catch (error) {
+      response.status(400).json({ error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
+  app.post("/api/session/theme/pin", async (request, response) => {
+    try {
+      response.json({ session: await service.pinRevisitableTheme(request.body.themeId) });
+    } catch (error) {
+      response.status(400).json({ error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
+  app.post("/api/session/theme/unpin", async (request, response) => {
+    try {
+      response.json({ session: await service.unpinRevisitableTheme(request.body.themeId) });
+    } catch (error) {
+      response.status(400).json({ error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
   app.post("/api/session/mock-transcript", async (request, response) => {
     try {
       response.json({ session: await service.injectMockTranscript(request.body.text, request.body.sourceId) });

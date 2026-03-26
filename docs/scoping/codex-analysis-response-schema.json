@@ -10,6 +10,7 @@
     "topicDecisions",
     "suggestions",
     "offTopicObservations",
+    "revisitableThemes",
     "warnings"
   ],
   "properties": {
@@ -67,6 +68,9 @@
       "items": {
         "$ref": "#/$defs/offTopicObservation"
       }
+    },
+    "revisitableThemes": {
+      "$ref": "#/$defs/revisitableThemeDelta"
     },
     "warnings": {
       "type": "array",
@@ -205,6 +209,107 @@
           "minItems": 1,
           "items": {
             "$ref": "#/$defs/evidence"
+          }
+        }
+      }
+    },
+    "revisitableThemeUpsert": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "themeId",
+        "label",
+        "summary",
+        "supportingMoments",
+        "confidence",
+        "rationale",
+        "evidence",
+        "promptEligible"
+      ],
+      "properties": {
+        "themeId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1
+        },
+        "supportingMoments": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "rationale": {
+          "type": "string",
+          "minLength": 1
+        },
+        "evidence": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/evidence"
+          }
+        },
+        "promptEligible": {
+          "type": "boolean"
+        }
+      }
+    },
+    "revisitableThemeMerge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "fromThemeId",
+        "intoThemeId",
+        "rationale"
+      ],
+      "properties": {
+        "fromThemeId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "intoThemeId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "rationale": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "revisitableThemeDelta": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "upserts",
+        "merges"
+      ],
+      "properties": {
+        "upserts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/revisitableThemeUpsert"
+          }
+        },
+        "merges": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/revisitableThemeMerge"
           }
         }
       }

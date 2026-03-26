@@ -12,6 +12,7 @@ import type {
   TopicState,
   TopicStateChange
 } from "../domain/types.js";
+import { createEmptySessionRecap, createEmptySessionSummary } from "../domain/types.js";
 
 async function ensureDir(target: string): Promise<void> {
   await fs.mkdir(target, { recursive: true });
@@ -165,7 +166,9 @@ export class FileStore {
       durationSeconds,
       status: session.status,
       countsByState: counts,
-      proposedMarkdownPath: session.proposedMarkdownPath
+      proposedMarkdownPath: session.proposedMarkdownPath,
+      recapMarkdownPath: session.sessionRecap?.markdownPath ?? null,
+      recapOverview: session.sessionRecap?.overview ?? []
     };
   }
 
@@ -228,6 +231,10 @@ function normalizeLoadedSession(raw: Record<string, unknown>): SessionSnapshot {
 
   session.captureSources = normalizeCaptureSources(session.captureSources, session.microphoneSelection ?? null);
   session.recordedAudioPaths ??= {};
+  session.livePrompts ??= [];
+  session.sessionSummary ??= createEmptySessionSummary();
+  session.revisitableThemes ??= [];
+  session.sessionRecap ??= createEmptySessionRecap();
   session.sourceMonitors ??= Object.fromEntries(
     session.captureSources.map((source) => [source.id, {
       sourceId: source.id,

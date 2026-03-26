@@ -27,6 +27,22 @@ const state = {
 };
 
 const topicStates = ["pending", "partial", "covered", "snoozed", "dismissed"];
+const completedTopicCleanupMs = 60_000;
+const minimumVisiblePromptConfidence = 0.75;
+const livePromptPresentation = {
+  active: { icon: "🎯", label: "Focus", badgeClass: "text-bg-primary" },
+  elaboration: { icon: "🗣️", label: "Say", badgeClass: "text-bg-success" },
+  next: { icon: "➡️", label: "Next", badgeClass: "text-bg-info" },
+  recovery: { icon: "🧭", label: "Recover", badgeClass: "text-bg-warning" },
+  "off-topic": { icon: "📝", label: "Note", badgeClass: "text-bg-secondary" }
+};
+const livePromptCountKey = {
+  active: "activeTopics",
+  elaboration: "elaborationStarters",
+  next: "adjacentNextTopics",
+  recovery: "recoveryPrompts",
+  "off-topic": "offTopicObservations"
+};
 
 const byId = (id) => document.getElementById(id);
 
@@ -222,44 +238,6 @@ function appendMarkdownRow(container, text, options = {}) {
   container.appendChild(row);
 }
 
-function appendTopicDetails(container, topicId, label, childTopics, session, suggestionIndex) {
-  const detailsWrap = document.createElement("div");
-  detailsWrap.className = "ps-5 mb-1";
-
-  const details = document.createElement("details");
-  details.className = "small";
-  details.open = state.expandedTopics.has(topicId);
-  details.addEventListener("toggle", () => {
-    if (details.open) {
-      state.expandedTopics.add(topicId);
-      return;
-    }
-
-    state.expandedTopics.delete(topicId);
-  });
-
-  const summary = document.createElement("summary");
-  summary.className = "text-body-secondary";
-  summary.textContent = label;
-  details.appendChild(summary);
-
-  const childContainer = document.createElement("div");
-  childContainer.className = "pt-1";
-
-  childTopics.forEach((childTopic) => {
-    appendMarkdownRow(childContainer, buildTopicLine(childTopic, suggestionIndex, true), { topic: childTopic });
-
-    const elaborationPrompts = suggestionIndex.elaborationByTopic.get(childTopic.id) || [];
-    elaborationPrompts.forEach((prompt) => {
-      appendMarkdownRow(childContainer, `    - ${prompt.text} (${Math.round(prompt.confidence * 100)}%)`);
-    });
-  });
-
-  details.appendChild(childContainer);
-  detailsWrap.appendChild(details);
-  container.appendChild(detailsWrap);
-}
-
 function sectionLines(title, lines) {
   return [
     `## ${title}`,
@@ -268,43 +246,178 @@ function sectionLines(title, lines) {
   ];
 }
 
-function buildSuggestionIndex(session) {
-  const activeByTopic = new Map();
-  const elaborationByTopic = new Map();
-  const floatingPrompts = [];
+function topicCompletedAt(topic) {
+  if (!topic || (topic.currentState !== "covered" && topic.currentState !== "dismissed") || !topic.lastUpdatedAt) {
+    return null;
+  }
 
-  session.suggestions.activeTopics.forEach((prompt) => {
-    if (prompt.topicId && session.topics[prompt.topicId]) {
-      activeByTopic.set(prompt.topicId, prompt);
+  return Date.parse(topic.lastUpdatedAt);
+}
+
+function isCompletedTopicHidden(topic, nowMs = Date.now()) {
+  const completedAt = topicCompletedAt(topic);
+  return completedAt !== null && nowMs - completedAt >= completedTopicCleanupMs;
+}
+
+function isTopicVisibleInLive(topic, nowMs = Date.now()) {
+  return Boolean(topic) && !isCompletedTopicHidden(topic, nowMs);
+}
+
+function compareLivePrompts(left, right) {
+  const timeDelta = Date.parse(right.lastSeenAt) - Date.parse(left.lastSeenAt);
+  if (timeDelta !== 0) {
+    return timeDelta;
+  }
+
+  return right.confidence - left.confidence;
+}
+
+function promptPriority(kind) {
+  switch (kind) {
+    case "active":
+      return 0;
+    case "elaboration":
+      return 1;
+    case "recovery":
+      return 2;
+    case "next":
+      return 3;
+    case "off-topic":
+      return 4;
+    default:
+      return 5;
+  }
+}
+
+function compareTopicPrompts(left, right) {
+  const priorityDelta = promptPriority(left.kind) - promptPriority(right.kind);
+  if (priorityDelta !== 0) {
+    return priorityDelta;
+  }
+
+  return compareLivePrompts(left, right);
+}
+
+function rootTopicForPrompt(session, prompt) {
+  if (!prompt.topicId) {
+    return null;
+  }
+
+  let topic = session.topics[prompt.topicId];
+  while (topic?.parentId) {
+    topic = session.topics[topic.parentId];
+  }
+
+  return topic || null;
+}
+
+function buildSuggestionIndex(session, config) {
+  const byTopic = new Map();
+  const allVisible = [];
+  const floatingPrompts = [];
+  const visibleCounts = config?.visibleSuggestionCounts || {};
+  const seenByKind = {
+    active: 0,
+    elaboration: 0,
+    next: 0,
+    recovery: 0,
+    "off-topic": 0
+  };
+  const prompts = (session.livePrompts || [])
+    .filter((prompt) => !prompt.dismissedAt)
+    .filter((prompt) => prompt.confidence >= minimumVisiblePromptConfidence)
+    .filter((prompt) => {
+      if (!prompt.topicId) {
+        return true;
+      }
+
+      return isTopicVisibleInLive(session.topics[prompt.topicId]);
+    })
+    .sort(compareLivePrompts);
+
+  prompts.forEach((prompt) => {
+    const limitKey = livePromptCountKey[prompt.kind];
+    const limit = typeof visibleCounts[limitKey] === "number" ? visibleCounts[limitKey] : Number.POSITIVE_INFINITY;
+    if (seenByKind[prompt.kind] >= limit) {
       return;
     }
 
-    floatingPrompts.push({ category: "Active", prompt });
+    seenByKind[prompt.kind] += 1;
+    allVisible.push(prompt);
+    if (prompt.topicId && session.topics[prompt.topicId]) {
+      const items = byTopic.get(prompt.topicId) || [];
+      items.push(prompt);
+      byTopic.set(prompt.topicId, items);
+      return;
+    }
+
+    floatingPrompts.push(prompt);
   });
 
-  session.suggestions.elaborationStarters.forEach((prompt) => {
-    if (prompt.topicId && session.topics[prompt.topicId]) {
-      const items = elaborationByTopic.get(prompt.topicId) || [];
-      items.push(prompt);
-      elaborationByTopic.set(prompt.topicId, items);
-      return;
-    }
-
-    floatingPrompts.push({ category: "Prompt", prompt });
+  byTopic.forEach((items, topicId) => {
+    byTopic.set(topicId, items.slice().sort(compareTopicPrompts));
   });
 
   return {
-    activeByTopic,
-    elaborationByTopic,
-    floatingPrompts
+    byTopic,
+    allVisible,
+    floatingPrompts: floatingPrompts.slice().sort(compareTopicPrompts)
   };
 }
 
-function buildTopicLine(topic, suggestionIndex, isChild = false) {
-  const activePrompt = suggestionIndex.activeByTopic.get(topic.id);
+function buildTopicLine(topic, isChild = false) {
   const prefix = isChild ? "  - " : "- ";
-  const focusText = activePrompt ? `  ${Math.round(activePrompt.confidence * 100)}%` : "";
-  return `${prefix}${topic.text}${focusText}`;
+  return `${prefix}${topic.text}`;
+}
+
+function createLivePromptRow(prompt, indentClass = "ps-5") {
+  const presentation = livePromptPresentation[prompt.kind] || livePromptPresentation.active;
+  const row = document.createElement("div");
+  row.className = `${indentClass} mb-1`;
+  row.title = prompt.rationale;
+
+  const body = document.createElement("div");
+  body.className = "d-flex align-items-start gap-2 border rounded px-2 py-1 bg-body-tertiary";
+
+  const badge = document.createElement("span");
+  badge.className = `badge ${presentation.badgeClass} flex-shrink-0`;
+  badge.textContent = `${presentation.icon} ${presentation.label}`;
+
+  const text = document.createElement("div");
+  text.className = "flex-grow-1";
+  const primary = document.createElement("div");
+  primary.textContent = prompt.text;
+  const meta = document.createElement("div");
+  meta.className = "small text-body-secondary";
+  meta.textContent = `${Math.round(prompt.confidence * 100)}% · seen ${formatRelativeFromNow(prompt.lastSeenAt)}`;
+  text.append(primary, meta);
+
+  const dismiss = document.createElement("button");
+  dismiss.className = "btn-close btn-close-sm flex-shrink-0 mt-1";
+  dismiss.type = "button";
+  dismiss.setAttribute("aria-label", "Dismiss prompt");
+  dismiss.title = "Dismiss prompt";
+  dismiss.addEventListener("click", async () => {
+    try {
+      await requestJson("/api/session/live-prompt/dismiss", {
+        method: "POST",
+        body: JSON.stringify({ promptId: prompt.id })
+      });
+      await loadState();
+    } catch (error) {
+      showError(error.message);
+    }
+  });
+
+  body.append(badge, text, dismiss);
+  row.appendChild(body);
+  return row;
+}
+
+function appendLivePromptRows(container, prompts, indentClass = "ps-5") {
+  prompts.forEach((prompt) => {
+    container.appendChild(createLivePromptRow(prompt, indentClass));
+  });
 }
 
 function renderNoticeSection(container, session) {
@@ -319,61 +432,132 @@ function renderNoticeSection(container, session) {
     })
   ].filter(Boolean);
 
-  sectionLines("Notices", noticeLines.length ? noticeLines : ["- None"]).forEach((text) => appendMarkdownRow(container, text));
+  if (!noticeLines.length) {
+    return;
+  }
+
+  sectionLines("Notices", noticeLines).forEach((text) => appendMarkdownRow(container, text));
 }
 
-function renderTalkingPointsSection(container, session, suggestionIndex) {
-  appendMarkdownRow(container, "## Talking Points");
+function deriveVisibleRootTopics(session) {
+  return Object.values(session.topics)
+    .filter((topic) => !topic.parentId)
+    .filter((topic) => isTopicVisibleInLive(topic))
+    .sort((left, right) => left.originalOrder - right.originalOrder);
+}
 
-  session.document.sections.forEach((section) => {
-    appendMarkdownRow(container, `### ${section.heading}`);
+function topicProgressRatio(topic, session) {
+  if (!topic.children.length) {
+    return topic.currentState === "covered" ? 1 : topic.currentState === "partial" ? 0.5 : 0;
+  }
 
-    let sectionHasContent = false;
+  const childTopics = topic.children
+    .map((childId) => session.topics[childId])
+    .filter(Boolean);
+  const coveredChildren = childTopics.filter((child) => child.currentState === "covered").length;
+  return coveredChildren / childTopics.length;
+}
 
-    section.blocks.forEach((block) => {
-      if (block.kind === "raw") {
-        const rawLine = block.line.trim();
-        if (!rawLine) {
-          return;
-        }
-        appendMarkdownRow(container, rawLine);
-        sectionHasContent = true;
-        return;
-      }
+function topInlinePrompt(topic, suggestionIndex) {
+  const prompts = suggestionIndex.byTopic.get(topic.id) || [];
+  return prompts.find((prompt) => prompt.kind === "active" || prompt.kind === "elaboration" || prompt.kind === "recovery") || null;
+}
 
-      const topic = session.topics[block.topicId];
-      if (!topic || topic.parentId) {
-        return;
-      }
+function deriveCurrentTopic(session, suggestionIndex) {
+  const visibleTopics = deriveVisibleRootTopics(session);
+  const promptBackedTopic = suggestionIndex.allVisible
+    .map((prompt) => rootTopicForPrompt(session, prompt))
+    .find((topic) => topic && isTopicVisibleInLive(topic) && topInlinePrompt(topic, suggestionIndex));
 
-      appendMarkdownRow(container, buildTopicLine(topic, suggestionIndex), { topic });
-      sectionHasContent = true;
+  if (promptBackedTopic) {
+    return promptBackedTopic;
+  }
 
-      const elaborationPrompts = suggestionIndex.elaborationByTopic.get(topic.id) || [];
-      elaborationPrompts.forEach((prompt) => {
-        appendMarkdownRow(container, `  - ${prompt.text} (${Math.round(prompt.confidence * 100)}%)`);
-      });
+  const mostRecentlyUpdated = visibleTopics
+    .filter((topic) => topic.currentState === "partial")
+    .sort((left, right) => (right.lastUpdatedAt || "").localeCompare(left.lastUpdatedAt || ""))[0];
+  if (mostRecentlyUpdated) {
+    return mostRecentlyUpdated;
+  }
 
-      const childTopics = topic.children
-        .map((childId) => session.topics[childId])
-        .filter(Boolean);
+  return visibleTopics[0] || null;
+}
 
-      if (childTopics.length) {
-        appendTopicDetails(container, topic.id, `Show beats (${childTopics.length})`, childTopics, session, suggestionIndex);
-      }
-    });
+function deriveNextPrompt(session, currentTopic, suggestionIndex) {
+  const nextPrompts = suggestionIndex.allVisible
+    .filter((prompt) => prompt.kind === "next")
+    .filter((prompt) => {
+      const rootTopic = rootTopicForPrompt(session, prompt);
+      return !rootTopic || !currentTopic || rootTopic.id !== currentTopic.id;
+    })
+    .sort(compareTopicPrompts);
 
-    if (!sectionHasContent) {
-      appendMarkdownRow(container, "- None");
-    }
+  if (!nextPrompts.length) {
+    return null;
+  }
 
+  if (!currentTopic) {
+    return nextPrompts[0];
+  }
+
+  const currentPrompt = topInlinePrompt(currentTopic, suggestionIndex);
+  const shouldShow = topicProgressRatio(currentTopic, session) >= 0.5 || !currentPrompt;
+  return shouldShow ? nextPrompts[0] : null;
+}
+
+function renderCurrentFocusSection(container, session, suggestionIndex) {
+  appendMarkdownRow(container, "## Now");
+  const currentTopic = deriveCurrentTopic(session, suggestionIndex);
+  if (!currentTopic) {
+    appendMarkdownRow(container, "- No active topic");
     appendMarkdownRow(container, "");
+    return null;
+  }
+
+  appendMarkdownRow(container, `### ${currentTopic.section}`);
+  appendMarkdownRow(container, buildTopicLine(currentTopic), { topic: currentTopic });
+
+  const topicPrompt = topInlinePrompt(currentTopic, suggestionIndex);
+  if (topicPrompt) {
+    appendLivePromptRows(container, [topicPrompt]);
+  }
+
+  const childTopics = currentTopic.children
+    .map((childId) => session.topics[childId])
+    .filter((childTopic) => isTopicVisibleInLive(childTopic));
+
+  childTopics.forEach((childTopic) => {
+    appendMarkdownRow(container, buildTopicLine(childTopic, true), { topic: childTopic });
+    const childPrompt = topInlinePrompt(childTopic, suggestionIndex);
+    if (childPrompt) {
+      appendLivePromptRows(container, [childPrompt], "ps-5");
+    }
   });
+
+  appendMarkdownRow(container, "");
+  return currentTopic;
 }
 
-function renderSuggestionSection(container, title, items, emptyMessage) {
-  const lines = items.length ? items : [emptyMessage];
-  sectionLines(title, lines).forEach((text) => appendMarkdownRow(container, text));
+function renderUpNextSection(container, session, currentTopic, suggestionIndex) {
+  const nextPrompt = deriveNextPrompt(session, currentTopic, suggestionIndex);
+  if (!nextPrompt) {
+    return;
+  }
+
+  appendMarkdownRow(container, "## Up Next");
+  container.appendChild(createLivePromptRow(nextPrompt, ""));
+  appendMarkdownRow(container, "");
+}
+
+function renderOffTopicSection(container, suggestionIndex) {
+  const offTopicPrompts = suggestionIndex.allVisible.filter((prompt) => prompt.kind === "off-topic");
+  if (!offTopicPrompts.length) {
+    return;
+  }
+
+  appendMarkdownRow(container, "## Off-topic");
+  appendLivePromptRows(container, offTopicPrompts, "");
+  appendMarkdownRow(container, "");
 }
 
 function buildTranscriptDisplayRows(session) {
@@ -520,45 +704,175 @@ function renderLiveMarkdown(data) {
     return;
   }
 
-  const suggestionIndex = buildSuggestionIndex(session);
+  const suggestionIndex = buildSuggestionIndex(session, data.config);
 
   renderNoticeSection(container, session);
-  renderTalkingPointsSection(container, session, suggestionIndex);
-
-  renderSuggestionSection(
-    container,
-    "Live Prompts",
-    suggestionIndex.floatingPrompts.map(({ category, prompt }) => `- ${category}: ${prompt.text} (${Math.round(prompt.confidence * 100)}%)`),
-    "- None"
-  );
-
-  renderSuggestionSection(
-    container,
-    "Next Up",
-    session.suggestions.adjacentNextTopics.map((prompt) => {
-      const relatedTopic = prompt.topicId && session.topics[prompt.topicId]
-        ? ` -> ${session.topics[prompt.topicId].text}`
-        : "";
-      return `- ${prompt.text}${relatedTopic} (${Math.round(prompt.confidence * 100)}%)`;
-    }),
-    "- None"
-  );
-
-  renderSuggestionSection(
-    container,
-    "Off-topic Observations",
-    session.offTopicObservations.map((item) => `- ${item.label} (${Math.round(item.confidence * 100)}%)`),
-    "- None"
-  );
-
-  renderSuggestionSection(
-    container,
-    "Recovery Prompts",
-    session.suggestions.recoveryPrompts.map((prompt) => `- ${prompt.text} (${Math.round(prompt.confidence * 100)}%)`),
-    "- None"
-  );
+  const currentTopic = renderCurrentFocusSection(container, session, suggestionIndex);
+  renderUpNextSection(container, session, currentTopic, suggestionIndex);
+  renderOffTopicSection(container, suggestionIndex);
 
   renderTranscriptPane(session);
+}
+
+async function postThemeAction(action, themeId) {
+  await requestJson(`/api/session/theme/${action}`, {
+    method: "POST",
+    body: JSON.stringify({ themeId })
+  });
+  await loadState();
+}
+
+function renderSessionSummary(session) {
+  const container = byId("session-summary-pane");
+  container.innerHTML = "";
+
+  const heading = document.createElement("div");
+  heading.className = "fw-semibold text-body-emphasis";
+  heading.textContent = "Session Summary";
+  container.appendChild(heading);
+
+  if (!session) {
+    const empty = document.createElement("div");
+    empty.className = "text-body-secondary";
+    empty.textContent = "No active session.";
+    container.appendChild(empty);
+    return;
+  }
+
+  const bullets = session.sessionSummary?.bullets || [];
+  if (!bullets.length) {
+    const empty = document.createElement("div");
+    empty.className = "text-body-secondary";
+    empty.textContent = "No summary yet. Analyze a chunk to build session context.";
+    container.appendChild(empty);
+    return;
+  }
+
+  container.classList.remove("text-body-secondary");
+  bullets.forEach((bullet) => {
+    const row = document.createElement("div");
+    row.textContent = `• ${bullet}`;
+    container.appendChild(row);
+  });
+}
+
+function themeBadge(theme) {
+  if (theme.pinnedAt) {
+    return { label: "Pinned", className: "text-bg-primary" };
+  }
+  if (theme.status === "dormant") {
+    return { label: "Dormant", className: "text-bg-secondary" };
+  }
+  return { label: "Active", className: "text-bg-success" };
+}
+
+function createThemeRow(theme) {
+  const wrapper = document.createElement("div");
+  wrapper.className = "border rounded p-2 bg-body-tertiary";
+
+  const header = document.createElement("div");
+  header.className = "d-flex justify-content-between align-items-start gap-2 flex-wrap";
+
+  const titleWrap = document.createElement("div");
+  const title = document.createElement("div");
+  title.className = "fw-semibold text-body-emphasis";
+  title.textContent = theme.label;
+
+  const summary = document.createElement("div");
+  summary.className = "small text-body-secondary";
+  summary.textContent = theme.summary;
+  titleWrap.append(title, summary);
+
+  const badge = document.createElement("span");
+  const themeMeta = themeBadge(theme);
+  badge.className = `badge ${themeMeta.className}`;
+  badge.textContent = themeMeta.label;
+  header.append(titleWrap, badge);
+
+  const meta = document.createElement("div");
+  meta.className = "small text-body-secondary mt-2";
+  meta.textContent = [
+    `Confidence ${Math.round((theme.confidence || 0) * 100)}%`,
+    theme.promptEligible ? "prompt-eligible" : "not prompting",
+    theme.lastUpdatedAt ? `updated ${formatRelativeFromNow(theme.lastUpdatedAt)}` : null
+  ].filter(Boolean).join(" · ");
+
+  wrapper.append(header, meta);
+
+  if ((theme.supportingMoments || []).length) {
+    const moments = document.createElement("div");
+    moments.className = "small mt-2";
+    theme.supportingMoments.forEach((moment) => {
+      const line = document.createElement("div");
+      line.className = "text-body-emphasis";
+      line.textContent = `• ${moment}`;
+      moments.appendChild(line);
+    });
+    wrapper.appendChild(moments);
+  }
+
+  const actions = document.createElement("div");
+  actions.className = "d-flex gap-2 mt-2";
+
+  const pinButton = document.createElement("button");
+  pinButton.className = "btn btn-sm btn-outline-primary";
+  pinButton.type = "button";
+  pinButton.textContent = theme.pinnedAt ? "Unpin" : "Pin";
+  pinButton.addEventListener("click", async () => {
+    try {
+      await postThemeAction(theme.pinnedAt ? "unpin" : "pin", theme.id);
+    } catch (error) {
+      showError(error.message);
+    }
+  });
+
+  const dismissButton = document.createElement("button");
+  dismissButton.className = "btn btn-sm btn-outline-secondary";
+  dismissButton.type = "button";
+  dismissButton.textContent = "Dismiss";
+  dismissButton.addEventListener("click", async () => {
+    try {
+      await postThemeAction("dismiss", theme.id);
+    } catch (error) {
+      showError(error.message);
+    }
+  });
+
+  actions.append(pinButton, dismissButton);
+  wrapper.appendChild(actions);
+  return wrapper;
+}
+
+function renderRevisitableThemes(session) {
+  const container = byId("revisitable-themes-pane");
+  container.innerHTML = "";
+
+  const heading = document.createElement("div");
+  heading.className = "fw-semibold text-body-emphasis";
+  heading.textContent = "Revisitable Themes";
+  container.appendChild(heading);
+
+  if (!session) {
+    const empty = document.createElement("div");
+    empty.className = "text-body-secondary";
+    empty.textContent = "No active session.";
+    container.appendChild(empty);
+    return;
+  }
+
+  const themes = (session.revisitableThemes || []).filter((theme) => theme.status !== "dismissed");
+  if (!themes.length) {
+    const empty = document.createElement("div");
+    empty.className = "text-body-secondary";
+    empty.textContent = "No revisitable themes yet.";
+    container.appendChild(empty);
+    return;
+  }
+
+  container.classList.remove("text-body-secondary");
+  themes.forEach((theme) => {
+    container.appendChild(createThemeRow(theme));
+  });
 }
 
 function renderGroupedCaptureSelect(catalog, selectedSources) {
@@ -704,7 +1018,11 @@ function renderHistory(entries, targetId, resumable = false) {
       <div class="fw-semibold">${entry.id}</div>
       <div>${entry.status} · ${(entry.durationSeconds / 60).toFixed(1)} min</div>
       <div class="text-body-secondary">covered ${entry.countsByState.covered} · partial ${entry.countsByState.partial} · pending ${entry.countsByState.pending}</div>
-      <a class="small" href="${entry.proposedMarkdownPath.replace(/^.*\/sessions\//, "/artifacts/")}" target="_blank" rel="noreferrer">Proposed markdown</a>
+      <div class="d-flex gap-3 flex-wrap">
+        <a class="small" href="${entry.proposedMarkdownPath.replace(/^.*\/sessions\//, "/artifacts/")}" target="_blank" rel="noreferrer">Proposed markdown</a>
+        ${entry.recapMarkdownPath ? `<a class="small" href="${entry.recapMarkdownPath.replace(/^.*\/sessions\//, "/artifacts/")}" target="_blank" rel="noreferrer">Session recap</a>` : ""}
+      </div>
+      ${(entry.recapOverview || []).length ? `<div class="text-body-secondary mt-2">${entry.recapOverview.slice(0, 2).map((line) => `• ${line}`).join("<br />")}</div>` : ""}
     `);
     if (resumable) {
       const button = document.createElement("button");
@@ -856,6 +1174,10 @@ function renderConfig(data) {
   renderSelectedSourcesSummary(config.captureSources || []);
   fillSimpleSelect(byId("stt-provider"), data.runtime.availableProviders.stt, config.sttProvider);
   fillSimpleSelect(byId("analysis-provider"), data.runtime.availableProviders.analysis, config.analysisProvider);
+  byId("analysis-provider-meta").textContent = [
+    `Saved selection: ${config.analysisProvider}`,
+    `Runtime default (.env): ${data.runtime.defaultProviders.analysis}`
+  ].join(" · ");
   byId("chunk-sensitivity").value = config.chunkSensitivity;
   byId("analysis-threshold").value = String(config.analysisAutoApplyThreshold);
   byId("analysis-threshold-label").textContent = `${Math.round(config.analysisAutoApplyThreshold * 100)}%`;
@@ -900,6 +1222,8 @@ function renderLive(data) {
     byId("session-meta").textContent = "No active session.";
     renderSourceMonitors(data.sourceMonitors);
     renderLiveMarkdown(data);
+    renderSessionSummary(null);
+    renderRevisitableThemes(null);
     return;
   }
 
@@ -911,6 +1235,8 @@ function renderLive(data) {
   byId("session-meta").textContent = [
     `Started ${formatRelativeFromNow(session.startedAt)}`,
     `Status ${session.status}`,
+    `STT ${session.sttProvider}`,
+    `Analysis ${session.analysisProvider}`,
     `${session.captureSources.length} source${session.captureSources.length === 1 ? "" : "s"}`,
     session.latestAnalysisAt ? `Last analysis ${formatRelativeFromNow(session.latestAnalysisAt)}` : null,
     session.lastError ? "Error present" : null
@@ -918,6 +1244,8 @@ function renderLive(data) {
   fillMockSourceSelect(session);
   renderSourceMonitors(session.sourceMonitors);
   renderLiveMarkdown(data);
+  renderSessionSummary(session);
+  renderRevisitableThemes(session);
 }
 
 async function loadState() {

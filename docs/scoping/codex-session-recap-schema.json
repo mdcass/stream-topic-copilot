@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.com/stream-topic-copilot/codex-session-recap-schema.json",
+  "title": "CodexSessionRecapResponse",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "overview",
+    "preparedTopicsCovered",
+    "otherThemesDiscussed",
+    "poignantMoments",
+    "futureFollowUps"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "type": "string",
+      "const": "codexSessionRecap.v1"
+    },
+    "overview": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "preparedTopicsCovered": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "otherThemesDiscussed": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "poignantMoments": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "futureFollowUps": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    }
+  }
+}

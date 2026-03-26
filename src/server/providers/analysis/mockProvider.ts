@@ -1,6 +1,11 @@
 import type { AnalysisProvider } from "./providerTypes.js";
-import type { CodexAnalysisResponse } from "../../domain/analysis/schema.js";
-import type { AnalysisProviderResult, AnalysisRunInput } from "../../domain/types.js";
+import type { CodexAnalysisResponse, CodexSessionRecapResponse } from "../../domain/analysis/schema.js";
+import type {
+  AnalysisProviderResult,
+  AnalysisRunInput,
+  SessionRecapProviderResult,
+  SessionRecapRunInput
+} from "../../domain/types.js";
 
 function buildMockResponse(input: AnalysisRunInput): CodexAnalysisResponse {
   const unresolvedTopics = Object.values(input.session.topics)
@@ -55,7 +60,45 @@ function buildMockResponse(input: AnalysisRunInput): CodexAnalysisResponse {
       rationale: "The chunk contains conversational filler that may not map directly to a prepared topic.",
       evidence: [{ chunkId: input.chunk.id, excerpt }]
     }] : [],
+    revisitableThemes: excerpt ? {
+      upserts: [{
+        themeId: null,
+        label: "General stream banter",
+        summary: "The session drifted into broader chatter outside the prepared topic plan.",
+        supportingMoments: [excerpt],
+        confidence: 0.56,
+        rationale: "A lightweight revisitable theme helps the app remember non-topic discussion.",
+        evidence: [{ chunkId: input.chunk.id, excerpt }],
+        promptEligible: excerpt.split(/\s+/).length > 16
+      }],
+      merges: []
+    } : {
+      upserts: [],
+      merges: []
+    },
     warnings: []
+  };
+}
+
+function buildMockRecap(input: SessionRecapRunInput): CodexSessionRecapResponse {
+  const coveredTopics = Object.values(input.session.topics)
+    .filter((topic) => topic.currentState === "covered")
+    .map((topic) => topic.text);
+  const revisitableThemes = input.session.revisitableThemes
+    .filter((theme) => theme.status !== "dismissed")
+    .map((theme) => theme.label);
+
+  return {
+    schemaVersion: "codexSessionRecap.v1",
+    overview: [
+      `The session covered ${coveredTopics.length} prepared topic${coveredTopics.length === 1 ? "" : "s"} and kept a few broader conversational threads in play.`
+    ],
+    preparedTopicsCovered: coveredTopics.slice(0, 8),
+    otherThemesDiscussed: revisitableThemes.slice(0, 8),
+    poignantMoments: input.session.revisitableThemes
+      .flatMap((theme) => theme.supportingMoments.slice(0, 1))
+      .slice(0, 5),
+    futureFollowUps: revisitableThemes.slice(0, 4).map((theme) => `Revisit ${theme} with a fresh concrete example.`)
   };
 }
 
@@ -64,6 +107,15 @@ export class MockAnalysisProvider implements AnalysisProvider {
 
   async analyze(input: AnalysisRunInput): Promise<AnalysisProviderResult> {
     const response = buildMockResponse(input);
+    return {
+      response,
+      rawResponse: JSON.stringify(response, null, 2),
+      latencyMs: 10
+    };
+  }
+
+  async generateSessionRecap(input: SessionRecapRunInput): Promise<SessionRecapProviderResult> {
+    const response = buildMockRecap(input);
     return {
       response,
       rawResponse: JSON.stringify(response, null, 2),

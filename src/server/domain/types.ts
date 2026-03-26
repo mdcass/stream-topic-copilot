@@ -1,7 +1,9 @@
 import type {
   AnalysisWarning,
   CodexAnalysisResponse,
+  CodexSessionRecapResponse,
   OffTopicObservation,
+  RevisitableThemeDelta,
   Suggestion,
   TopicDecision
 } from "./analysis/schema.js";
@@ -13,12 +15,16 @@ export type TopicKind = "cluster" | "beat";
 export type TopicStateOrigin = "user" | "analysis" | "inferred";
 export type SessionStatus = "active" | "paused" | "interrupted" | "finished";
 export type ChunkSensitivity = "low" | "medium" | "high";
+export type LivePromptKind = "active" | "elaboration" | "next" | "recovery" | "off-topic" | "theme";
 export type MicrophonePermissionState = "granted" | "denied" | "not-determined" | "unknown" | "unavailable";
 export type SystemAudioPermissionState = MicrophonePermissionState;
 export type PermissionState = MicrophonePermissionState;
 export type CaptureSourceKind = "microphone" | "system-mix" | "loopback-input" | "native-display-audio" | "native-app-audio";
 export type CaptureSourceTransport = "input-device" | "screencapturekit" | "mock";
 export type CaptureMonitorStatus = "idle" | "running" | "error" | "unsupported";
+export type RevisitableThemeStatus = "active" | "dormant" | "dismissed";
+export type RevisitableThemeManualState = "pinned" | "dismissed" | null;
+export type SessionRecapStatus = "pending" | "ready" | "failed";
 
 export type SuggestionBuckets = CodexAnalysisResponse["suggestions"];
 
@@ -217,6 +223,57 @@ export interface StoredAnalysisResult {
   rawResponsePath: string;
 }
 
+export interface LivePromptRecord {
+  id: string;
+  kind: LivePromptKind;
+  text: string;
+  confidence: number;
+  rationale: string;
+  topicId: string | null;
+  firstSeenAt: string;
+  lastSeenAt: string;
+  lastChunkId: string;
+  dismissedAt: string | null;
+}
+
+export interface SessionSummary {
+  updatedAt: string | null;
+  bullets: string[];
+}
+
+export interface RevisitableThemeRecord {
+  id: string;
+  label: string;
+  summary: string;
+  supportingMoments: string[];
+  confidence: number;
+  rationale: string;
+  sourceChunkIds: string[];
+  firstSeenAt: string;
+  lastUpdatedAt: string;
+  lastReinforcedAt: string;
+  lastReinforcedPass: number;
+  modelPromptEligible: boolean;
+  promptEligible: boolean;
+  status: RevisitableThemeStatus;
+  pinnedAt: string | null;
+  dismissedAt: string | null;
+  manualState: RevisitableThemeManualState;
+}
+
+export interface SessionRecap {
+  status: SessionRecapStatus;
+  generatedAt: string | null;
+  markdownPath: string | null;
+  jsonPath: string | null;
+  overview: string[];
+  preparedTopicsCovered: string[];
+  otherThemesDiscussed: string[];
+  poignantMoments: string[];
+  futureFollowUps: string[];
+  error: string | null;
+}
+
 export interface SessionSnapshot {
   id: string;
   sourceMarkdownPath: string;
@@ -245,7 +302,11 @@ export interface SessionSnapshot {
   pendingTranscriptEvents: TranscriptEvent[];
   analyses: StoredAnalysisResult[];
   suggestions: SuggestionBuckets;
+  livePrompts: LivePromptRecord[];
   offTopicObservations: OffTopicObservation[];
+  sessionSummary: SessionSummary;
+  revisitableThemes: RevisitableThemeRecord[];
+  sessionRecap: SessionRecap;
   warnings: AnalysisWarning[];
   pendingDecisions: TopicDecision[];
   actionHistory: TopicStateChange[];
@@ -263,6 +324,8 @@ export interface HistoryEntry {
   status: SessionStatus;
   countsByState: Record<TopicState, number>;
   proposedMarkdownPath: string;
+  recapMarkdownPath: string | null;
+  recapOverview: string[];
 }
 
 export interface AnalysisRunInput {
@@ -276,6 +339,10 @@ export interface AppStateResponse {
   runtime: {
     pollingIntervalMs: number;
     activeSessionId: string | null;
+    defaultProviders: {
+      stt: string;
+      analysis: string;
+    };
     availableProviders: {
       stt: string[];
       analysis: string[];
@@ -303,6 +370,17 @@ export interface AnalysisProviderResult {
   latencyMs: number;
 }
 
+export interface SessionRecapRunInput {
+  session: SessionSnapshot;
+  config: AppConfig;
+}
+
+export interface SessionRecapProviderResult {
+  response: CodexSessionRecapResponse;
+  rawResponse: string;
+  latencyMs: number;
+}
+
 export interface StateCountSummary {
   pending: number;
   partial: number;
@@ -317,6 +395,28 @@ export function createEmptySuggestions(): SuggestionBuckets {
     elaborationStarters: [],
     adjacentNextTopics: [],
     recoveryPrompts: []
+  };
+}
+
+export function createEmptySessionSummary(): SessionSummary {
+  return {
+    updatedAt: null,
+    bullets: []
+  };
+}
+
+export function createEmptySessionRecap(): SessionRecap {
+  return {
+    status: "pending",
+    generatedAt: null,
+    markdownPath: null,
+    jsonPath: null,
+    overview: [],
+    preparedTopicsCovered: [],
+    otherThemesDiscussed: [],
+    poignantMoments: [],
+    futureFollowUps: [],
+    error: null
   };
 }
 

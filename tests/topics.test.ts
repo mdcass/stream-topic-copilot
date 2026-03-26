@@ -3,7 +3,12 @@ import { describe, expect, it } from "vitest";
 import { createEmptyDisplayTranscript } from "../src/server/domain/transcript/display.js";
 import { parseTopicsMarkdown } from "../src/server/domain/topics/markdownParser.js";
 import { buildProposedMarkdown } from "../src/server/domain/topics/proposedMarkdown.js";
-import type { SessionSnapshot, TopicRecord } from "../src/server/domain/types.js";
+import {
+  createEmptySessionRecap,
+  createEmptySessionSummary,
+  type SessionSnapshot,
+  type TopicRecord
+} from "../src/server/domain/types.js";
 
 function createSessionFromMarkdown(markdown: string): SessionSnapshot {
   const document = parseTopicsMarkdown(markdown);
@@ -55,7 +60,11 @@ function createSessionFromMarkdown(markdown: string): SessionSnapshot {
       adjacentNextTopics: [],
       recoveryPrompts: []
     },
+    livePrompts: [],
     offTopicObservations: [],
+    sessionSummary: createEmptySessionSummary(),
+    revisitableThemes: [],
+    sessionRecap: createEmptySessionRecap(),
     warnings: [],
     pendingDecisions: [],
     actionHistory: [],
@@ -105,8 +114,29 @@ describe("proposed markdown generation", () => {
 
     expect(output).toContain("## Done");
     expect(output).toContain("- [x] New PC build <!-- id: tp_001; covered: 2026-03-14-abcd -->");
+    expect(output).toContain("## Touched This Session");
     expect(output).toContain("## Dismissed");
-    expect(output).toContain("- [ ] Weird developer habits <!-- id: tp_002; dismissed -->");
+    expect(output).toContain("- [-] Weird developer habits <!-- id: tp_002; dismissed -->");
     expect(output).not.toContain("## Priority\n- [ ] New PC build");
+  });
+
+  it("surfaces partial progress both inline and in the touched summary", () => {
+    const session = createSessionFromMarkdown(`# Stream Topics
+
+## Priority
+- [ ] Reliable AI for coding work <!-- id: tp_reliable -->
+  - Reliable means hands-off results <!-- id: tp_definition -->
+`);
+
+    session.topics.tp_reliable.currentState = "partial";
+    session.topics.tp_reliable.directState = "partial";
+    session.topics.tp_definition.currentState = "partial";
+    session.topics.tp_definition.directState = "partial";
+
+    const output = buildProposedMarkdown(session);
+
+    expect(output).toContain("- [~] Reliable AI for coding work <!-- id: tp_reliable; partial: 2026-03-14-abcd -->");
+    expect(output).toContain("## Touched This Session");
+    expect(output).toContain("  - [~] Reliable means hands-off results <!-- id: tp_definition; partial: 2026-03-14-abcd -->");
   });
 });

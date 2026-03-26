@@ -8,6 +8,48 @@ import type { StartSttOptions, SttProvider, SttProviderHandlers, SttProviderSess
 
 const execFileAsync = promisify(execFile);
 
+function normalizeForOverlap(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+export function shouldReplaceWhisperSnapshot(previousText: string, nextText: string, elapsedMs: number): boolean {
+  if (!previousText || elapsedMs >= 8_000) {
+    return false;
+  }
+
+  const previous = normalizeForOverlap(previousText);
+  const next = normalizeForOverlap(nextText);
+  if (!previous || !next || previous === next) {
+    return false;
+  }
+
+  // Whisper partials usually extend or slightly revise the same utterance.
+  if (next.startsWith(previous) || previous.startsWith(next)) {
+    return true;
+  }
+
+  const previousWords = previous.split(" ").filter(Boolean);
+  const nextWords = next.split(" ").filter(Boolean);
+  const previousTail = previousWords.slice(-6).join(" ");
+  const nextHead = nextWords.slice(0, 6).join(" ");
+
+  return previousTail.length >= 12 && previousTail === nextHead;
+}
+
+export function isBenignWhisperStderr(text: string): boolean {
+  return (
+    /^main:\s+/i.test(text) ||
+    /^init:\s+/i.test(text) ||
+    /^whisper_/i.test(text) ||
+    /^whisper_backend_init:/i.test(text) ||
+    /^ggml_/i.test(text)
+  );
+}
+
 export class WhisperCppProvider implements SttProvider {
   readonly name = "whisper";
   private cachedSources: CaptureSourceDescriptor[] = [];
@@ -86,6 +128,10 @@ export class WhisperCppProvider implements SttProvider {
         return;
       }
 
+      if (isBenignWhisperStderr(text)) {
+        return;
+      }
+
       this.lastStartError = text;
       void handlers.onError(new Error(text));
     });
@@ -111,7 +157,7 @@ export class WhisperCppProvider implements SttProvider {
     }
 
     const now = Date.now();
-    const replaceLast = this.lastPublishedText.length > 0 && (now - this.lastPublishedAt) < 8_000;
+    const replaceLast = shouldReplaceWhisperSnapshot(this.lastPublishedText, cleaned, now - this.lastPublishedAt);
     if (cleaned === this.lastPublishedText) {
       return;
     }

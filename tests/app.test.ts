@@ -8,8 +8,9 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { createApp } from "../src/server/app.js";
 import { AppService } from "../src/server/appService.js";
-import type { RuntimeConfig } from "../src/server/domain/types.js";
+import type { AnalysisProviderResult, AnalysisRunInput, RuntimeConfig } from "../src/server/domain/types.js";
 import { MockAnalysisProvider } from "../src/server/providers/analysis/mockProvider.js";
+import type { AnalysisProvider } from "../src/server/providers/analysis/providerTypes.js";
 import { MockSttProvider } from "../src/server/providers/stt/mockProvider.js";
 import type { SttProvider, SttProviderHandlers, SttProviderSession } from "../src/server/providers/stt/providerTypes.js";
 
@@ -134,6 +135,16 @@ class StreamingWhisperProvider implements SttProvider {
   }
 }
 
+class ScriptedAnalysisProvider implements AnalysisProvider {
+  readonly name = "scripted";
+
+  constructor(private readonly handler: (input: AnalysisRunInput) => Promise<AnalysisProviderResult>) {}
+
+  async analyze(input: AnalysisRunInput): Promise<AnalysisProviderResult> {
+    return this.handler(input);
+  }
+}
+
 async function writeFakeNativeHelper(runtimeConfig: RuntimeConfig, script: string): Promise<void> {
   await fs.mkdir(path.dirname(runtimeConfig.nativeSystemAudioHelper), { recursive: true });
   await fs.writeFile(runtimeConfig.nativeSystemAudioHelper, script, { mode: 0o755 });
@@ -163,7 +174,7 @@ describe("app session flow", () => {
       .expect(200);
 
     const startResponse = await request(app).post("/api/session/start").expect(200);
-    expect(startResponse.body.session.id).toMatch(/^2026|^20/);
+    expect(startResponse.body.session.id).toMatch(/^20\d{2}-\d{2}-\d{2}-\d{4}-[0-9a-f]{4}$/);
 
     await request(app)
       .post("/api/session/mock-transcript")
@@ -171,6 +182,7 @@ describe("app session flow", () => {
       .expect(200);
 
     const stateResponse = await request(app).get("/api/state").expect(200);
+    expect(stateResponse.body.runtime.defaultProviders.analysis).toBe("mock");
     expect(stateResponse.body.activeSession.latestTranscriptTail).toHaveLength(1);
     expect(stateResponse.body.activeSession.visibleTranscriptEvents).toHaveLength(1);
     expect(stateResponse.body.activeSession.latestTranscriptTail[0].sourceName).toBe("Mock Studio Mic");
@@ -189,6 +201,344 @@ describe("app session flow", () => {
     const finalState = await request(app).get("/api/state").expect(200);
     expect(finalState.body.activeSession).toBeNull();
     expect(await fs.readFile(path.join(sessionDir, "transcript.approx.srt"), "utf8")).toContain("00:00:00,");
+  });
+
+  it("waits for more content before auto-analyzing medium sentence-complete chunks", async () => {
+    const runtimeConfig = await createRuntimeConfig();
+    runtimeConfig.chunkWordThreshold = null;
+    runtimeConfig.chunkTimeThresholdSeconds = null;
+    const service = new AppService(
+      runtimeConfig,
+      new Map([["mock", new MockSttProvider()]]),
+      new Map([["mock", new MockAnalysisProvider()]])
+    );
+    await service.initialize();
+    const app = createApp(service, runtimeConfig.publicDir, runtimeConfig.sessionsDir, process.cwd());
+
+    await request(app)
+      .post("/api/config")
+      .send({
+        captureSources: [{
+          id: "mock-mic-default",
+          kind: "microphone",
+          name: "Mock Studio Mic"
+        }],
+        chunkSensitivity: "medium"
+      })
+      .expect(200);
+
+    await request(app).post("/api/session/start").expect(200);
+
+    await request(app)
+      .post("/api/session/mock-transcript")
+      .send({
+        text: "This is a fairly complete sentence about the new PC build and the cooling issue, but medium mode should not analyze it on its own yet."
+      })
+      .expect(200);
+
+    let stateResponse = await request(app).get("/api/state").expect(200);
+    expect(stateResponse.body.activeSession.chunks).toHaveLength(0);
+    expect(stateResponse.body.activeSession.analyses).toHaveLength(0);
+
+    await request(app)
+      .post("/api/session/mock-transcript")
+      .send({
+        text: "This second complete sentence adds more detail about cable routing mistakes and should finally push medium mode over the semantic chunk threshold."
+      })
+      .expect(200);
+
+    stateResponse = await request(app).get("/api/state").expect(200);
+    expect(stateResponse.body.activeSession.chunks.length).toBeGreaterThanOrEqual(1);
+    expect(stateResponse.body.activeSession.analyses.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("does not let blank placeholders reset an already applied topic state", async () => {
+    const runtimeConfig = await createRuntimeConfig();
+    runtimeConfig.chunkWordThreshold = 1;
+    runtimeConfig.chunkTimeThresholdSeconds = 1;
+    const service = new AppService(
+      runtimeConfig,
+      new Map([["mock", new MockSttProvider()]]),
+      new Map([["scripted", new ScriptedAnalysisProvider(async (input) => ({
+        response: {
+          schemaVersion: "codexAnalysis.v1",
+          chunkId: input.chunk.id,
+          topicDecisions: [{
+            topicId: "tp_001",
+            suggestedState: input.chunk.text.includes("[BLANK_AUDIO]") ? "pending" : "partial",
+            confidence: 0.95,
+            rationale: "Scripted provider for regression coverage.",
+            evidence: [{ chunkId: input.chunk.id, excerpt: input.chunk.text }]
+          }],
+          suggestions: {
+            activeTopics: [],
+            elaborationStarters: [],
+            adjacentNextTopics: [],
+            recoveryPrompts: []
+          },
+          offTopicObservations: [],
+          revisitableThemes: {
+            upserts: [],
+            merges: []
+          },
+          warnings: []
+        },
+        rawResponse: input.chunk.text,
+        latencyMs: 1
+      }))]])
+    );
+    await service.initialize();
+    const app = createApp(service, runtimeConfig.publicDir, runtimeConfig.sessionsDir, process.cwd());
+
+    await request(app)
+      .post("/api/config")
+      .send({
+        captureSources: [{
+          id: "mock-mic-default",
+          kind: "microphone",
+          name: "Mock Studio Mic"
+        }],
+        analysisProvider: "scripted"
+      })
+      .expect(200);
+
+    await request(app).post("/api/session/start").expect(200);
+
+    await request(app)
+      .post("/api/session/mock-transcript")
+      .send({ text: "I finally started the new PC build and the cooling issue is still annoying." })
+      .expect(200);
+
+    let stateResponse = await request(app).get("/api/state").expect(200);
+    expect(stateResponse.body.activeSession.topics.tp_001.currentState).toBe("partial");
+
+    await request(app)
+      .post("/api/session/mock-transcript")
+      .send({ text: "[BLANK_AUDIO]" })
+      .expect(200);
+
+    const endResponse = await request(app).post("/api/session/end").send({ status: "finished" }).expect(200);
+    expect(endResponse.body.session.topics.tp_001.currentState).toBe("partial");
+  });
+
+  it("keeps live prompts until they are dismissed", async () => {
+    const runtimeConfig = await createRuntimeConfig();
+    runtimeConfig.chunkWordThreshold = 1;
+    runtimeConfig.chunkTimeThresholdSeconds = 1;
+    let analyzeCount = 0;
+    const service = new AppService(
+      runtimeConfig,
+      new Map([["mock", new MockSttProvider()]]),
+      new Map([["scripted", new ScriptedAnalysisProvider(async (input) => {
+        analyzeCount += 1;
+        return {
+          response: {
+            schemaVersion: "codexAnalysis.v1",
+            chunkId: input.chunk.id,
+            topicDecisions: [],
+            suggestions: analyzeCount === 1 ? {
+              activeTopics: [{
+                text: "Stay on the PC build and make the cooling tradeoff explicit.",
+                confidence: 0.92,
+                rationale: "The first chunk is clearly about the PC build.",
+                evidence: [{ chunkId: input.chunk.id, excerpt: input.chunk.text }],
+                topicId: "tp_001"
+              }],
+              elaborationStarters: [{
+                text: "Name the one detail that made the cooling issue annoying.",
+                confidence: 0.88,
+                rationale: "This helps the streamer add a concrete example.",
+                evidence: [{ chunkId: input.chunk.id, excerpt: input.chunk.text }],
+                topicId: "tp_001"
+              }],
+              adjacentNextTopics: [],
+              recoveryPrompts: []
+            } : {
+              activeTopics: [],
+              elaborationStarters: [],
+              adjacentNextTopics: [],
+              recoveryPrompts: []
+            },
+            offTopicObservations: [],
+            revisitableThemes: {
+              upserts: [],
+              merges: []
+            },
+            warnings: []
+          },
+          rawResponse: input.chunk.text,
+          latencyMs: 1
+        };
+      })]])
+    );
+    await service.initialize();
+    const app = createApp(service, runtimeConfig.publicDir, runtimeConfig.sessionsDir, process.cwd());
+
+    await request(app)
+      .post("/api/config")
+      .send({
+        captureSources: [{
+          id: "mock-mic-default",
+          kind: "microphone",
+          name: "Mock Studio Mic"
+        }],
+        analysisProvider: "scripted"
+      })
+      .expect(200);
+
+    await request(app).post("/api/session/start").expect(200);
+
+    let stateResponse = await request(app)
+      .post("/api/session/mock-transcript")
+      .send({ text: "I finally started the new PC build and the cooling issue is still annoying." })
+      .expect(200);
+
+    expect(stateResponse.body.session.livePrompts).toHaveLength(2);
+
+    stateResponse = await request(app)
+      .post("/api/session/mock-transcript")
+      .send({ text: "Now I am rambling without a new prompt suggestion." })
+      .expect(200);
+
+    expect(stateResponse.body.session.livePrompts.filter((prompt: { dismissedAt: string | null; }) => !prompt.dismissedAt)).toHaveLength(2);
+
+    const promptId = stateResponse.body.session.livePrompts[0].id;
+    const dismissResponse = await request(app)
+      .post("/api/session/live-prompt/dismiss")
+      .send({ promptId })
+      .expect(200);
+
+    expect(dismissResponse.body.session.livePrompts.find((prompt: { id: string; }) => prompt.id === promptId).dismissedAt).toBeTruthy();
+  });
+
+  it("promotes an analysis-marked partial parent to covered when child beats complete it", async () => {
+    const runtimeConfig = await createRuntimeConfig();
+    runtimeConfig.chunkWordThreshold = 1;
+    runtimeConfig.chunkTimeThresholdSeconds = 1;
+    const customMarkdownPath = path.join(runtimeConfig.dataDir, "promotion-topics.md");
+    await fs.writeFile(
+      customMarkdownPath,
+      `# Stream Topics
+
+## Priority
+- [ ] Reliable AI for coding work <!-- id: tp_parent -->
+  - Reliable means hands-off results <!-- id: tp_child_1 -->
+  - Teams start in review-heavy mode <!-- id: tp_child_2 -->
+`
+    );
+
+    let analyzeCount = 0;
+    const service = new AppService(
+      runtimeConfig,
+      new Map([["mock", new MockSttProvider()]]),
+      new Map([["scripted", new ScriptedAnalysisProvider(async (input) => {
+        analyzeCount += 1;
+        const topicDecisions = analyzeCount === 1
+          ? [{
+            topicId: "tp_parent",
+            suggestedState: "partial" as const,
+            confidence: 0.95,
+            rationale: "The cluster has been introduced but not finished.",
+            evidence: [{ chunkId: input.chunk.id, excerpt: input.chunk.text }]
+          }]
+          : [{
+            topicId: "tp_child_1",
+            suggestedState: "covered" as const,
+            confidence: 0.95,
+            rationale: "The child beat is now fully covered.",
+            evidence: [{ chunkId: input.chunk.id, excerpt: input.chunk.text }]
+          }];
+
+        return {
+          response: {
+            schemaVersion: "codexAnalysis.v1",
+            chunkId: input.chunk.id,
+            topicDecisions,
+            suggestions: {
+              activeTopics: [],
+              elaborationStarters: [],
+              adjacentNextTopics: [],
+              recoveryPrompts: []
+            },
+            offTopicObservations: [],
+            revisitableThemes: {
+              upserts: [],
+              merges: []
+            },
+            warnings: []
+          },
+          rawResponse: input.chunk.text,
+          latencyMs: 1
+        };
+      })]])
+    );
+    await service.initialize();
+    const app = createApp(service, runtimeConfig.publicDir, runtimeConfig.sessionsDir, process.cwd());
+
+    await request(app)
+      .post("/api/config")
+      .send({
+        markdownFilePath: customMarkdownPath,
+        captureSources: [{
+          id: "mock-mic-default",
+          kind: "microphone",
+          name: "Mock Studio Mic"
+        }],
+        analysisProvider: "scripted"
+      })
+      .expect(200);
+
+    await request(app).post("/api/session/start").expect(200);
+
+    await request(app)
+      .post("/api/session/mock-transcript")
+      .send({ text: "Let me define what I mean by reliable AI." })
+      .expect(200);
+
+    const stateResponse = await request(app)
+      .post("/api/session/mock-transcript")
+      .send({ text: "Reliable means hands-off results that work without review." })
+      .expect(200);
+
+    expect(stateResponse.body.session.topics.tp_parent.currentState).toBe("covered");
+    expect(stateResponse.body.session.topics.tp_parent.stateSetBy).toBe("inferred");
+  });
+
+  it("ignores late analysis failures after the session has been cleared", async () => {
+    const runtimeConfig = await createRuntimeConfig();
+    const service = new AppService(
+      runtimeConfig,
+      new Map([["mock", new MockSttProvider()]]),
+      new Map([["scripted", new ScriptedAnalysisProvider(async () => {
+        await delay(25);
+        throw new Error("late failure");
+      })]])
+    );
+    await service.initialize();
+
+    await service.updateConfig({
+      captureSources: [{
+        id: "mock-mic-default",
+        kind: "microphone",
+        name: "Mock Studio Mic"
+      }],
+      analysisProvider: "scripted"
+    });
+    await service.startSession();
+
+    const runAnalysis = (service as unknown as { runAnalysis: (chunk: AnalysisRunInput["chunk"]) => Promise<void>; }).runAnalysis.bind(service);
+    const promise = runAnalysis({
+      id: "chunk_late_failure",
+      startedAt: "2026-03-14T09:00:00.000Z",
+      endedAt: "2026-03-14T09:00:05.000Z",
+      text: "A delayed analysis failure should not crash after session teardown.",
+      wordCount: 10,
+      eventIds: []
+    });
+
+    (service as unknown as { activeSession: null; }).activeSession = null;
+
+    await expect(promise).resolves.toBeUndefined();
   });
 
   it("returns a clear error when UI assets are missing", async () => {

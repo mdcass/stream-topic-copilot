@@ -3,7 +3,14 @@ import { describe, expect, it } from "vitest";
 import { buildAnalysisPrompt } from "../src/server/domain/analysis/promptBuilder.js";
 import { createEmptyDisplayTranscript } from "../src/server/domain/transcript/display.js";
 import { parseTopicsMarkdown } from "../src/server/domain/topics/markdownParser.js";
-import type { AppConfig, SessionSnapshot, TopicRecord, TranscriptChunk } from "../src/server/domain/types.js";
+import {
+  createEmptySessionRecap,
+  createEmptySessionSummary,
+  type AppConfig,
+  type SessionSnapshot,
+  type TopicRecord,
+  type TranscriptChunk
+} from "../src/server/domain/types.js";
 
 function createSession(): SessionSnapshot {
   const document = parseTopicsMarkdown(`# Stream Topics
@@ -59,7 +66,11 @@ function createSession(): SessionSnapshot {
       adjacentNextTopics: [],
       recoveryPrompts: []
     },
+    livePrompts: [],
     offTopicObservations: [],
+    sessionSummary: createEmptySessionSummary(),
+    revisitableThemes: [],
+    sessionRecap: createEmptySessionRecap(),
     warnings: [],
     pendingDecisions: [],
     actionHistory: [],
@@ -151,5 +162,64 @@ describe("analysis prompt builder", () => {
     expect(prompt).toContain("Recent transcript context");
     expect(prompt).toContain("Quick recap of the last stream.");
     expect(prompt).toContain("\"chunkId\": \"chunk_000\"");
+  });
+
+  it("includes rolling summary and revisitable theme context", () => {
+    const session = createSession();
+    session.sessionSummary = {
+      updatedAt: "2026-03-14T09:00:10.000Z",
+      bullets: ["Prepared topics: 0 covered, 1 partial, 0 pending."]
+    };
+    session.revisitableThemes.push({
+      id: "mem_001",
+      label: "Build frustration",
+      summary: "The streamer kept circling back to cooling frustration outside the formal plan.",
+      supportingMoments: ["Cooling regret kept interrupting the story."],
+      confidence: 0.84,
+      rationale: "This theme may be worth revisiting later.",
+      sourceChunkIds: ["chunk_000"],
+      firstSeenAt: "2026-03-14T09:00:05.000Z",
+      lastUpdatedAt: "2026-03-14T09:00:10.000Z",
+      lastReinforcedAt: "2026-03-14T09:00:10.000Z",
+      lastReinforcedPass: 1,
+      modelPromptEligible: true,
+      promptEligible: true,
+      status: "active",
+      pinnedAt: null,
+      dismissedAt: null,
+      manualState: null
+    });
+
+    const chunk: TranscriptChunk = {
+      id: "chunk_001",
+      startedAt: "2026-03-14T09:00:11.000Z",
+      endedAt: "2026-03-14T09:00:16.000Z",
+      text: "[Streamer Mic] I should probably come back to that cooling frustration later.",
+      wordCount: 12,
+      eventIds: ["evt_1"]
+    };
+
+    const prompt = buildAnalysisPrompt(session, chunk, {
+      markdownFilePath: "/tmp/topics.md",
+      captureSources: session.captureSources,
+      sttProvider: "mock",
+      analysisProvider: "mock",
+      chunkSensitivity: "medium",
+      visibleSuggestionCounts: {
+        activeTopics: 3,
+        elaborationStarters: 3,
+        adjacentNextTopics: 3,
+        recoveryPrompts: 3,
+        offTopicObservations: 3
+      },
+      sessionResumePreference: "manual",
+      analysisAutoApplyThreshold: 0.8,
+      pollingIntervalMs: 2000,
+      transcriptTailSize: 30
+    });
+
+    expect(prompt).toContain("Rolling session summary");
+    expect(prompt).toContain("Build frustration");
+    expect(prompt).toContain("Revisitable themes eligible for revival");
   });
 });

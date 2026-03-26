@@ -1,30 +1,37 @@
+import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import { execFile } from "node:child_process";
 import path from "node:path";
 import { promisify } from "node:util";
 
-import { codexAnalysisResponseSchema } from "./domain/analysis/schema.js";
+import { codexAnalysisResponseSchema, type RevisitableThemeDelta } from "./domain/analysis/schema.js";
 import { buildAnalysisPrompt } from "./domain/analysis/promptBuilder.js";
 import { applyTranscriptDisplayEvent, createEmptyDisplayTranscript } from "./domain/transcript/display.js";
 import { buildApproximateSrt } from "./domain/transcript/subtitles.js";
 import {
   createDefaultAppConfig,
   createEmptySuggestions,
+  createEmptySessionRecap,
+  createEmptySessionSummary,
   type AppConfig,
   type AppStateResponse,
   type CaptureSourceDescriptor,
   type CaptureSourceMonitorState,
   type ChunkSensitivity,
+  type SessionRecap,
   type RuntimeConfig,
+  type RevisitableThemeRecord,
   type SelectedCaptureSourceConfig,
   type SessionSnapshot,
+  type LivePromptKind,
+  type LivePromptRecord,
   type TopicRecord,
   type TopicState,
   type TopicStateChange,
   type TranscriptChunk,
   type TranscriptEvent
 } from "./domain/types.js";
-import type { TopicDecision } from "./domain/analysis/schema.js";
+import type { CodexAnalysisResponse, OffTopicObservation, Suggestion, TopicDecision } from "./domain/analysis/schema.js";
 import { parseTopicsMarkdown } from "./domain/topics/markdownParser.js";
 import { buildProposedMarkdown } from "./domain/topics/proposedMarkdown.js";
 import { FileStore } from "./infra/fileStore.js";
@@ -43,8 +50,19 @@ const sensitivityDefaults: Record<ChunkSensitivity, { words: number; seconds: nu
   high: { words: 50, seconds: 30 }
 };
 
+const sentenceCompletionWordThresholds: Record<ChunkSensitivity, number> = {
+  low: 120,
+  medium: 45,
+  high: 20
+};
+
 const execFileAsync = promisify(execFile);
 const NATIVE_SYSTEM_AUDIO_UNAVAILABLE_REASON = "Native display/app audio is disabled until a signed helper identity is available.";
+const MAX_SESSION_SUMMARY_BULLETS = 6;
+const MAX_REVISITABLE_THEMES = 8;
+const MAX_THEME_MOMENTS = 3;
+const THEME_DORMANT_AFTER_PASSES = 6;
+const THEME_DORMANT_AFTER_MS = 45 * 60 * 1000;
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -54,10 +72,39 @@ function wordCount(value: string): number {
   return value.trim().split(/\s+/).filter(Boolean).length;
 }
 
-function createSessionId(): string {
-  const date = new Date().toISOString().slice(0, 10);
+function normalizeTranscriptForSignal(value: string): string {
+  return value
+    .replace(/^\[[^\]]+\]\s*/gm, "")
+    .replace(/\[BLANK_AUDIO\]/gi, " ")
+    .replace(/\[Start speaking\]/gi, " ")
+    .replace(/\(I'm not sure what he said\)/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function meaningfulWordCount(value: string): number {
+  return normalizeTranscriptForSignal(value).split(/\s+/).filter(Boolean).length;
+}
+
+function isLowSignalTranscript(value: string): boolean {
+  return meaningfulWordCount(value) < 5;
+}
+
+function createSessionId(startedAt: string): string {
+  const date = startedAt.slice(0, 10);
+  const time = startedAt.slice(11, 16).replace(":", "");
   const slug = Math.floor(Math.random() * 0xffff).toString(16).padStart(4, "0");
-  return `${date}-${slug}`;
+  return `${date}-${time}-${slug}`;
+}
+
+function createThemeId(session: SessionSnapshot): string {
+  let index = session.revisitableThemes.length + 1;
+  let candidate = `mem_${String(index).padStart(3, "0")}`;
+  while (session.revisitableThemes.some((theme) => theme.id === candidate)) {
+    index += 1;
+    candidate = `mem_${String(index).padStart(3, "0")}`;
+  }
+  return candidate;
 }
 
 function createChunkId(session: SessionSnapshot): string {
@@ -254,12 +301,141 @@ function mergeTranscriptText(previous: string, next: string): string {
   return `${previous} ${next}`.replace(/\s+/g, " ").trim();
 }
 
+function shouldPreserveTopicStateOnLowSignal(currentState: TopicState, nextState: TopicState): boolean {
+  return currentState !== "pending" && currentState !== nextState;
+}
+
 function sourceArtifactsDir(sessionDir: string, sourceId: string): string {
   return path.join(sessionDir, "sources", sourceId.replace(/[^a-zA-Z0-9._-]+/g, "_"));
 }
 
 function isNativeCaptureSourceKind(kind: SelectedCaptureSourceConfig["kind"] | CaptureSourceDescriptor["kind"]): boolean {
   return kind === "native-display-audio" || kind === "native-app-audio";
+}
+
+function createLivePromptId(kind: LivePromptKind, text: string, topicId: string | null): string {
+  const normalizedText = text.trim().toLowerCase().replace(/\s+/g, " ");
+  return `lp_${crypto.createHash("sha1").update(`${kind}:${topicId ?? ""}:${normalizedText}`).digest("hex").slice(0, 12)}`;
+}
+
+function uniqueStrings(values: string[], limit: number): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const value of values.map((entry) => entry.trim()).filter(Boolean)) {
+    const key = value.toLowerCase();
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    result.push(value);
+    if (result.length >= limit) {
+      break;
+    }
+  }
+  return result;
+}
+
+function formatTopicList(topics: TopicRecord[], limit: number): string {
+  return topics.slice(0, limit).map((topic) => topic.text).join(", ");
+}
+
+function compareThemes(left: RevisitableThemeRecord, right: RevisitableThemeRecord): number {
+  const leftPinned = left.pinnedAt ? 1 : 0;
+  const rightPinned = right.pinnedAt ? 1 : 0;
+  if (leftPinned !== rightPinned) {
+    return rightPinned - leftPinned;
+  }
+
+  const leftPrompt = left.promptEligible ? 1 : 0;
+  const rightPrompt = right.promptEligible ? 1 : 0;
+  if (leftPrompt !== rightPrompt) {
+    return rightPrompt - leftPrompt;
+  }
+
+  const confidenceDelta = right.confidence - left.confidence;
+  if (confidenceDelta !== 0) {
+    return confidenceDelta;
+  }
+
+  return right.lastUpdatedAt.localeCompare(left.lastUpdatedAt);
+}
+
+function deriveSessionSummary(session: SessionSnapshot, recordedAt: string): SessionSnapshot["sessionSummary"] {
+  const bullets: string[] = [];
+  const topics = Object.values(session.topics);
+  const coveredTopics = topics
+    .filter((topic) => topic.currentState === "covered" && !topic.parentId)
+    .sort((left, right) => (right.lastUpdatedAt ?? "").localeCompare(left.lastUpdatedAt ?? ""));
+  const partialTopics = topics
+    .filter((topic) => topic.currentState === "partial" && !topic.parentId)
+    .sort((left, right) => (right.lastUpdatedAt ?? "").localeCompare(left.lastUpdatedAt ?? ""));
+  const activeThemes = session.revisitableThemes
+    .filter((theme) => theme.status !== "dismissed")
+    .slice()
+    .sort(compareThemes);
+
+  const counts = summarizeCounts(session.topics);
+  bullets.push(`Prepared topics: ${counts.covered} covered, ${counts.partial} partial, ${counts.pending} pending.`);
+
+  if (coveredTopics.length) {
+    bullets.push(`Recently covered: ${formatTopicList(coveredTopics, 3)}.`);
+  }
+  if (partialTopics.length) {
+    bullets.push(`Still in play: ${formatTopicList(partialTopics, 3)}.`);
+  }
+
+  activeThemes.slice(0, 3).forEach((theme) => {
+    bullets.push(`Revisitable: ${theme.label}. ${theme.summary}`);
+  });
+
+  return {
+    updatedAt: recordedAt,
+    bullets: uniqueStrings(bullets, MAX_SESSION_SUMMARY_BULLETS)
+  };
+}
+
+function buildSessionRecapMarkdown(session: SessionSnapshot, recap: SessionRecap): string {
+  const section = (title: string, items: string[]) => [
+    `## ${title}`,
+    ...(items.length ? items.map((item) => `- ${item}`) : ["- None"]),
+    ""
+  ];
+
+  return [
+    "# Session Recap",
+    "",
+    `- Session: ${session.id}`,
+    `- Started: ${session.startedAt}`,
+    `- Ended: ${session.endedAt ?? "In progress"}`,
+    "",
+    ...section("Overview", recap.overview),
+    ...section("Prepared Topics Covered", recap.preparedTopicsCovered),
+    ...section("Other Themes Discussed", recap.otherThemesDiscussed),
+    ...section("Poignant Moments", recap.poignantMoments),
+    ...section("Open Loops / Future Follow-ups", recap.futureFollowUps)
+  ].join("\n");
+}
+
+function inferredTopicStateFromChildren(childTopics: TopicRecord[]): TopicState {
+  const coveredChildren = childTopics.filter((child) => child.currentState === "covered").length;
+  const partialChildren = childTopics.filter((child) => child.currentState === "partial" || child.currentState === "covered").length;
+
+  if (coveredChildren > 0 && coveredChildren / childTopics.length >= 0.5) {
+    return "covered";
+  }
+  if (partialChildren > 0) {
+    return "partial";
+  }
+  return "pending";
+}
+
+function strongerTopicState(left: TopicState, right: TopicState): TopicState {
+  const rank: Record<"pending" | "partial" | "covered", number> = {
+    pending: 0,
+    partial: 1,
+    covered: 2
+  };
+  return rank[left as keyof typeof rank] >= rank[right as keyof typeof rank] ? left : right;
 }
 
 function groupLabelForSourceKind(kind: SelectedCaptureSourceConfig["kind"]): string {
@@ -408,6 +584,10 @@ export class AppService {
       runtime: {
         pollingIntervalMs: this.runtimeConfig.pollingIntervalMs,
         activeSessionId: this.activeSession?.id ?? null,
+        defaultProviders: {
+          stt: this.runtimeConfig.sttProvider,
+          analysis: this.runtimeConfig.analysisProvider
+        },
         availableProviders: {
           stt: Array.from(this.sttProviders.keys()),
           analysis: Array.from(this.analysisProviders.keys())
@@ -498,7 +678,8 @@ export class AppService {
 
     const sourceMarkdown = await this.fileStore.readFile(this.config.markdownFilePath);
     const document = parseTopicsMarkdown(sourceMarkdown);
-    const sessionId = createSessionId();
+    const startedAt = nowIso();
+    const sessionId = createSessionId(startedAt);
     const artifacts = await this.fileStore.createSessionArtifacts(sessionId, sourceMarkdown);
     const topics = Object.fromEntries(Object.values(document.topics).map((topic) => [topic.id, createTopicRecord(topic)]));
     const selectedSources = this.resolveSelectedCaptureSources();
@@ -507,7 +688,7 @@ export class AppService {
       sourceMarkdownPath: this.config.markdownFilePath,
       sourceSnapshotPath: artifacts.sourceSnapshotPath,
       sourceContentHash: this.fileStore.hashContent(sourceMarkdown),
-      startedAt: nowIso(),
+      startedAt,
       endedAt: null,
       sttProvider: this.config.sttProvider,
       analysisProvider: this.config.analysisProvider,
@@ -530,7 +711,11 @@ export class AppService {
       pendingTranscriptEvents: [],
       analyses: [],
       suggestions: createEmptySuggestions(),
+      livePrompts: [],
       offTopicObservations: [],
+      sessionSummary: createEmptySessionSummary(),
+      revisitableThemes: [],
+      sessionRecap: createEmptySessionRecap(),
       warnings: [],
       pendingDecisions: [],
       actionHistory: [],
@@ -567,6 +752,10 @@ export class AppService {
     loaded.displayTranscript ??= createEmptyDisplayTranscript();
     loaded.captureSources = normalizeCaptureSources(loaded.captureSources);
     loaded.recordedAudioPaths ??= {};
+    loaded.livePrompts ??= [];
+    loaded.sessionSummary ??= createEmptySessionSummary();
+    loaded.revisitableThemes ??= [];
+    loaded.sessionRecap ??= createEmptySessionRecap();
     loaded.sourceMonitors ??= Object.fromEntries(
       loaded.captureSources.map((source) => [source.id, createSourceMonitor(loaded.sttProvider, source)])
     );
@@ -599,6 +788,7 @@ export class AppService {
     this.activeSession.endedAt = nowIso();
     await this.finalizePendingChunk(true);
     await this.exportTranscriptArtifacts(this.activeSession);
+    await this.generateSessionRecapForActiveSession();
     await this.writeSessionArtifacts();
     await this.fileStore.writeFile(
       path.join(this.fileStore.sessionDir(this.activeSession.id), "session-summary.json"),
@@ -608,7 +798,9 @@ export class AppService {
         endedAt: this.activeSession.endedAt,
         countsByState: summarizeCounts(this.activeSession.topics),
         analyses: this.activeSession.analyses.length,
-        transcriptChunks: this.activeSession.chunks.length
+        transcriptChunks: this.activeSession.chunks.length,
+        recapMarkdownPath: this.activeSession.sessionRecap.markdownPath,
+        recapOverview: this.activeSession.sessionRecap.overview
       }, null, 2)
     );
 
@@ -643,6 +835,74 @@ export class AppService {
     }
 
     this.applyDirectState(topicId, nextState, "user", 1, "Manual user action");
+    await this.writeSessionArtifacts();
+    return cloneSession(this.activeSession);
+  }
+
+  async dismissLivePrompt(promptId: string): Promise<SessionSnapshot> {
+    if (!this.activeSession) {
+      throw new Error("No active session.");
+    }
+
+    const prompt = this.activeSession.livePrompts.find((candidate) => candidate.id === promptId);
+    if (!prompt) {
+      throw new Error(`Unknown live prompt ${promptId}.`);
+    }
+
+    prompt.dismissedAt = nowIso();
+    await this.writeSessionArtifacts();
+    return cloneSession(this.activeSession);
+  }
+
+  async dismissRevisitableTheme(themeId: string): Promise<SessionSnapshot> {
+    if (!this.activeSession) {
+      throw new Error("No active session.");
+    }
+
+    const theme = this.activeSession.revisitableThemes.find((candidate) => candidate.id === themeId);
+    if (!theme) {
+      throw new Error(`Unknown revisitable theme ${themeId}.`);
+    }
+
+    theme.manualState = "dismissed";
+    theme.dismissedAt = nowIso();
+    theme.pinnedAt = null;
+    this.refreshRevisitableThemeStatuses(theme.dismissedAt, this.activeSession.passCount);
+    await this.writeSessionArtifacts();
+    return cloneSession(this.activeSession);
+  }
+
+  async pinRevisitableTheme(themeId: string): Promise<SessionSnapshot> {
+    if (!this.activeSession) {
+      throw new Error("No active session.");
+    }
+
+    const theme = this.activeSession.revisitableThemes.find((candidate) => candidate.id === themeId);
+    if (!theme) {
+      throw new Error(`Unknown revisitable theme ${themeId}.`);
+    }
+
+    theme.manualState = "pinned";
+    theme.pinnedAt = nowIso();
+    theme.dismissedAt = null;
+    this.refreshRevisitableThemeStatuses(theme.pinnedAt, this.activeSession.passCount);
+    await this.writeSessionArtifacts();
+    return cloneSession(this.activeSession);
+  }
+
+  async unpinRevisitableTheme(themeId: string): Promise<SessionSnapshot> {
+    if (!this.activeSession) {
+      throw new Error("No active session.");
+    }
+
+    const theme = this.activeSession.revisitableThemes.find((candidate) => candidate.id === themeId);
+    if (!theme) {
+      throw new Error(`Unknown revisitable theme ${themeId}.`);
+    }
+
+    theme.manualState = null;
+    theme.pinnedAt = null;
+    this.refreshRevisitableThemeStatuses(nowIso(), this.activeSession.passCount);
     await this.writeSessionArtifacts();
     return cloneSession(this.activeSession);
   }
@@ -1171,10 +1431,17 @@ export class AppService {
       return null;
     }
     const words = wordCount(text);
+    const meaningfulWords = meaningfulWordCount(text);
     const durationSeconds = Math.max(0, Math.round((endedAt - startedAt) / 1000));
     const sentenceComplete = /[.!?]["']?$/.test(text);
+    const sentenceThreshold = sentenceCompletionWordThresholds[this.config.chunkSensitivity];
 
-    if (!force && !(words >= wordThreshold || durationSeconds >= timeThresholdSeconds || (sentenceComplete && words >= 20))) {
+    if (force && meaningfulWords < 5) {
+      this.activeSession.pendingTranscriptEvents.splice(0);
+      return null;
+    }
+
+    if (!force && !(meaningfulWords >= wordThreshold || durationSeconds >= timeThresholdSeconds || (sentenceComplete && meaningfulWords >= sentenceThreshold))) {
       return null;
     }
 
@@ -1216,19 +1483,22 @@ export class AppService {
       return;
     }
 
-    await this.fileStore.appendJsonl(this.activeSession.id, "transcript.chunks.jsonl", chunk);
+    const session = this.activeSession;
+    const sessionId = session.id;
 
-    const provider = this.analysisProviders.get(this.activeSession.analysisProvider);
+    await this.fileStore.appendJsonl(sessionId, "transcript.chunks.jsonl", chunk);
+
+    const provider = this.analysisProviders.get(session.analysisProvider);
     if (!provider) {
-      this.activeSession.lastError = `Unknown analysis provider ${this.activeSession.analysisProvider}.`;
+      this.activeSession.lastError = `Unknown analysis provider ${session.analysisProvider}.`;
       await this.writeSessionArtifacts();
       return;
     }
 
     const requestPayload = {
       chunkId: chunk.id,
-      sessionId: this.activeSession.id,
-      unresolvedTopics: Object.values(this.activeSession.topics)
+      sessionId,
+      unresolvedTopics: Object.values(session.topics)
         .filter((topic) => topic.currentState === "pending" || topic.currentState === "partial")
         .map((topic) => ({
           id: topic.id,
@@ -1236,26 +1506,39 @@ export class AppService {
           state: topic.currentState
         })),
       chunk,
-      promptPreview: buildAnalysisPrompt(this.activeSession, chunk, this.config)
+      promptPreview: buildAnalysisPrompt(session, chunk, this.config)
     };
-    await this.fileStore.appendJsonl(this.activeSession.id, "analysis.requests.jsonl", requestPayload);
+    await this.fileStore.appendJsonl(sessionId, "analysis.requests.jsonl", requestPayload);
 
     try {
       const result = await provider.analyze({
         chunk,
-        session: cloneSession(this.activeSession),
+        session: cloneSession(session),
         config: this.config
       });
       const response = codexAnalysisResponseSchema.parse(result.response);
-      const rawResponsePath = await this.fileStore.appendJsonl(this.activeSession.id, "analysis.responses.jsonl", {
+      const rawResponsePath = await this.fileStore.appendJsonl(sessionId, "analysis.responses.jsonl", {
         recordedAt: nowIso(),
         latencyMs: result.latencyMs,
         response
       });
+
+      if (!this.activeSession || this.activeSession.id !== sessionId) {
+        return;
+      }
+
+      const lowSignalChunk = isLowSignalTranscript(chunk.text);
       const applied: TopicDecision[] = [];
       const proposed: TopicDecision[] = [];
+      const recordedAt = nowIso();
+      const nextPassCount = this.activeSession.passCount + 1;
 
       for (const decision of response.topicDecisions) {
+        const currentTopic = this.activeSession.topics[decision.topicId];
+        if (lowSignalChunk && currentTopic && shouldPreserveTopicStateOnLowSignal(currentTopic.currentState, decision.suggestedState)) {
+          continue;
+        }
+
         if (decision.confidence >= this.config.analysisAutoApplyThreshold) {
           this.applyDirectState(decision.topicId, decision.suggestedState, "analysis", decision.confidence, decision.rationale, decision.evidence.map((item) => item.excerpt));
           applied.push(decision);
@@ -1268,24 +1551,99 @@ export class AppService {
       this.activeSession.suggestions = response.suggestions;
       this.activeSession.offTopicObservations = response.offTopicObservations;
       this.activeSession.warnings = response.warnings;
-      this.activeSession.latestAnalysisAt = nowIso();
-      this.activeSession.passCount += 1;
+      this.activeSession.latestAnalysisAt = recordedAt;
+      try {
+        this.applyRevisitableThemeDelta(response.revisitableThemes, recordedAt, nextPassCount);
+      } catch (error) {
+        this.activeSession.warnings = [
+          ...this.activeSession.warnings,
+          {
+            code: "revisitable-theme-apply-failed",
+            message: error instanceof Error ? error.message : String(error),
+            topicId: null
+          }
+        ];
+      }
+      this.mergeLivePrompts(response, recordedAt);
+      this.activeSession.passCount = nextPassCount;
+      this.refreshRevisitableThemeStatuses(recordedAt, this.activeSession.passCount);
       this.activeSession.analyses.push({
         chunkId: chunk.id,
         latencyMs: result.latencyMs,
         response,
         appliedDecisions: applied,
         proposedDecisions: proposed,
-        recordedAt: this.activeSession.latestAnalysisAt,
+        recordedAt,
         rawResponsePath
       });
       this.activeSession.lastError = null;
       await this.writeSessionArtifacts(result.rawResponse);
     } catch (error) {
+      if (!this.activeSession || this.activeSession.id !== sessionId) {
+        return;
+      }
+
       const message = error instanceof Error ? error.message : String(error);
       this.activeSession.lastError = `Analysis failed for ${chunk.id}: ${message}`;
       await this.writeSessionArtifacts();
     }
+  }
+
+  private upsertLivePrompt(
+    kind: LivePromptKind,
+    prompt: Suggestion | OffTopicObservation,
+    chunkId: string,
+    recordedAt: string
+  ): void {
+    if (!this.activeSession) {
+      return;
+    }
+
+    const text = "text" in prompt ? prompt.text : prompt.label;
+    const topicId = "topicId" in prompt ? prompt.topicId : null;
+    const promptId = createLivePromptId(kind, text, topicId);
+    const existing = this.activeSession.livePrompts.find((item) => item.id === promptId);
+
+    if (existing?.dismissedAt) {
+      return;
+    }
+
+    if (existing) {
+      existing.text = text;
+      existing.confidence = prompt.confidence;
+      existing.rationale = prompt.rationale;
+      existing.topicId = topicId;
+      existing.lastSeenAt = recordedAt;
+      existing.lastChunkId = chunkId;
+      return;
+    }
+
+    this.activeSession.livePrompts.push({
+      id: promptId,
+      kind,
+      text,
+      confidence: prompt.confidence,
+      rationale: prompt.rationale,
+      topicId,
+      firstSeenAt: recordedAt,
+      lastSeenAt: recordedAt,
+      lastChunkId: chunkId,
+      dismissedAt: null
+    });
+  }
+
+  private mergeLivePrompts(response: CodexAnalysisResponse, recordedAt: string): void {
+    response.suggestions.activeTopics.forEach((prompt) => this.upsertLivePrompt("active", prompt, response.chunkId, recordedAt));
+    response.suggestions.elaborationStarters.forEach((prompt) => this.upsertLivePrompt("elaboration", prompt, response.chunkId, recordedAt));
+    response.suggestions.adjacentNextTopics.forEach((prompt) => this.upsertLivePrompt("next", prompt, response.chunkId, recordedAt));
+    response.suggestions.recoveryPrompts.forEach((prompt) => this.upsertLivePrompt("recovery", prompt, response.chunkId, recordedAt));
+    response.offTopicObservations.forEach((prompt) => this.upsertLivePrompt("off-topic", prompt, response.chunkId, recordedAt));
+
+    if (!this.activeSession) {
+      return;
+    }
+
+    this.activeSession.livePrompts.sort((left, right) => right.lastSeenAt.localeCompare(left.lastSeenAt));
   }
 
   private applyDirectState(
@@ -1351,26 +1709,27 @@ export class AppService {
         continue;
       }
 
-      if (topic.directState) {
+      const childTopics = topic.children.map((childId) => this.activeSession?.topics[childId]).filter(Boolean) as TopicRecord[];
+      const previousState = topic.currentState;
+      const inferredState = inferredTopicStateFromChildren(childTopics);
+
+      if (topic.directState === "covered" || topic.directState === "dismissed" || topic.directState === "snoozed") {
         topic.currentState = topic.directState;
         topic.stateSetBy = topic.stateSetBy === "user" || topic.stateSetBy === "analysis" ? topic.stateSetBy : "analysis";
         continue;
       }
 
-      const childTopics = topic.children.map((childId) => this.activeSession?.topics[childId]).filter(Boolean) as TopicRecord[];
-      const coveredChildren = childTopics.filter((child) => child.currentState === "covered").length;
-      const partialChildren = childTopics.filter((child) => child.currentState === "partial" || child.currentState === "covered").length;
-      const previousState = topic.currentState;
-
-      if (coveredChildren > 0 && coveredChildren / childTopics.length >= 0.5) {
-        topic.currentState = "covered";
-      } else if (partialChildren > 0) {
-        topic.currentState = "partial";
+      if (topic.directState === "partial" || topic.directState === "pending") {
+        const effectiveState = strongerTopicState(topic.directState, inferredState);
+        topic.currentState = effectiveState;
+        topic.stateSetBy = effectiveState === topic.directState
+          ? (topic.stateSetBy === "user" || topic.stateSetBy === "analysis" ? topic.stateSetBy : "analysis")
+          : "inferred";
       } else {
-        topic.currentState = "pending";
+        topic.currentState = inferredState;
+        topic.stateSetBy = "inferred";
       }
 
-      topic.stateSetBy = "inferred";
       if (previousState !== topic.currentState) {
         topic.lastUpdatedAt = nowIso();
         void this.fileStore.appendStateChange(this.activeSession.id, {
@@ -1386,10 +1745,242 @@ export class AppService {
     }
   }
 
+  private applyRevisitableThemeDelta(delta: RevisitableThemeDelta, recordedAt: string, passCount: number): void {
+    if (!this.activeSession) {
+      return;
+    }
+
+    for (const upsert of delta.upserts) {
+      const existing = upsert.themeId
+        ? this.activeSession.revisitableThemes.find((theme) => theme.id === upsert.themeId)
+        : null;
+
+      if (existing?.manualState === "dismissed") {
+        continue;
+      }
+
+      const theme = existing ?? {
+        id: createThemeId(this.activeSession),
+        label: upsert.label,
+        summary: upsert.summary,
+        supportingMoments: [],
+        confidence: upsert.confidence,
+        rationale: upsert.rationale,
+        sourceChunkIds: [],
+        firstSeenAt: recordedAt,
+        lastUpdatedAt: recordedAt,
+        lastReinforcedAt: recordedAt,
+        lastReinforcedPass: passCount,
+        modelPromptEligible: false,
+        promptEligible: false,
+        status: "active" as const,
+        pinnedAt: null,
+        dismissedAt: null,
+        manualState: null
+      };
+
+      theme.label = upsert.label;
+      theme.summary = upsert.summary;
+      theme.supportingMoments = uniqueStrings(
+        [
+          ...upsert.supportingMoments,
+          ...upsert.evidence.map((item) => item.excerpt)
+        ],
+        MAX_THEME_MOMENTS
+      );
+      theme.confidence = upsert.confidence;
+      theme.rationale = upsert.rationale;
+      theme.sourceChunkIds = uniqueStrings(
+        [...theme.sourceChunkIds, ...upsert.evidence.map((item) => item.chunkId)],
+        MAX_REVISITABLE_THEMES * 4
+      );
+      theme.lastUpdatedAt = recordedAt;
+      theme.lastReinforcedAt = recordedAt;
+      theme.lastReinforcedPass = passCount;
+      theme.modelPromptEligible = upsert.promptEligible;
+      theme.dismissedAt = theme.manualState === "dismissed" ? theme.dismissedAt ?? recordedAt : null;
+
+      if (!existing) {
+        this.activeSession.revisitableThemes.push(theme);
+      }
+    }
+
+    for (const merge of delta.merges) {
+      const sourceIndex = this.activeSession.revisitableThemes.findIndex((theme) => theme.id === merge.fromThemeId);
+      const target = this.activeSession.revisitableThemes.find((theme) => theme.id === merge.intoThemeId);
+      if (sourceIndex < 0 || !target || merge.fromThemeId === merge.intoThemeId) {
+        continue;
+      }
+
+      const [source] = this.activeSession.revisitableThemes.splice(sourceIndex, 1);
+      if (!source) {
+        continue;
+      }
+
+      target.supportingMoments = uniqueStrings(
+        [...target.supportingMoments, ...source.supportingMoments],
+        MAX_THEME_MOMENTS
+      );
+      target.sourceChunkIds = uniqueStrings(
+        [...target.sourceChunkIds, ...source.sourceChunkIds],
+        MAX_REVISITABLE_THEMES * 4
+      );
+      target.confidence = Math.max(target.confidence, source.confidence);
+      target.rationale = merge.rationale || target.rationale;
+      target.lastUpdatedAt = recordedAt;
+      target.lastReinforcedAt = recordedAt;
+      target.lastReinforcedPass = Math.max(target.lastReinforcedPass, source.lastReinforcedPass, passCount);
+      target.modelPromptEligible = target.modelPromptEligible || source.modelPromptEligible;
+      if (!target.pinnedAt && source.pinnedAt) {
+        target.pinnedAt = source.pinnedAt;
+        target.manualState = "pinned";
+      }
+    }
+
+    this.refreshRevisitableThemeStatuses(recordedAt, passCount);
+    this.enforceRevisitableThemeLimit();
+  }
+
+  private refreshRevisitableThemeStatuses(recordedAt: string, passCount: number): void {
+    if (!this.activeSession) {
+      return;
+    }
+
+    for (const theme of this.activeSession.revisitableThemes) {
+      if (theme.manualState === "dismissed" || theme.dismissedAt) {
+        theme.status = "dismissed";
+        theme.promptEligible = false;
+        theme.dismissedAt ??= recordedAt;
+        continue;
+      }
+
+      if (theme.pinnedAt) {
+        theme.status = "active";
+        theme.promptEligible = true;
+        continue;
+      }
+
+      const dormantByPass = passCount - theme.lastReinforcedPass >= THEME_DORMANT_AFTER_PASSES;
+      const dormantByTime = Date.parse(recordedAt) - Date.parse(theme.lastReinforcedAt) >= THEME_DORMANT_AFTER_MS;
+      theme.status = dormantByPass || dormantByTime ? "dormant" : "active";
+      theme.promptEligible = theme.status === "active" && theme.modelPromptEligible;
+    }
+
+    this.activeSession.revisitableThemes.sort(compareThemes);
+  }
+
+  private enforceRevisitableThemeLimit(): void {
+    if (!this.activeSession) {
+      return;
+    }
+
+    const pinned = this.activeSession.revisitableThemes.filter((theme) => theme.pinnedAt);
+    const dismissed = this.activeSession.revisitableThemes.filter((theme) => theme.status === "dismissed");
+    const remainder = this.activeSession.revisitableThemes
+      .filter((theme) => !theme.pinnedAt && theme.status !== "dismissed")
+      .slice(0, Math.max(0, MAX_REVISITABLE_THEMES - pinned.length));
+
+    this.activeSession.revisitableThemes = [
+      ...pinned,
+      ...remainder,
+      ...dismissed
+    ].sort(compareThemes);
+  }
+
+  private async generateSessionRecapForActiveSession(): Promise<void> {
+    if (!this.activeSession) {
+      return;
+    }
+
+    const provider = this.analysisProviders.get(this.activeSession.analysisProvider);
+    const sessionDir = this.fileStore.sessionDir(this.activeSession.id);
+    const recapJsonPath = path.join(sessionDir, "session-recap.json");
+    const recapMarkdownPath = path.join(sessionDir, "session-recap.md");
+
+    try {
+      const recap = provider?.generateSessionRecap
+        ? await provider.generateSessionRecap({
+          session: cloneSession(this.activeSession),
+          config: this.config
+        })
+        : {
+          response: this.buildFallbackSessionRecap(),
+          rawResponse: JSON.stringify(this.buildFallbackSessionRecap(), null, 2),
+          latencyMs: 0
+        };
+      const generatedAt = nowIso();
+
+      this.activeSession.sessionRecap = {
+        status: "ready",
+        generatedAt,
+        jsonPath: recapJsonPath,
+        markdownPath: recapMarkdownPath,
+        overview: recap.response.overview,
+        preparedTopicsCovered: recap.response.preparedTopicsCovered,
+        otherThemesDiscussed: recap.response.otherThemesDiscussed,
+        poignantMoments: recap.response.poignantMoments,
+        futureFollowUps: recap.response.futureFollowUps,
+        error: null
+      };
+
+      await this.fileStore.writeFile(recapJsonPath, JSON.stringify(this.activeSession.sessionRecap, null, 2));
+      await this.fileStore.writeFile(recapMarkdownPath, buildSessionRecapMarkdown(this.activeSession, this.activeSession.sessionRecap));
+      await this.fileStore.appendJsonl(this.activeSession.id, "analysis.responses.jsonl", {
+        recordedAt: generatedAt,
+        latencyMs: recap.latencyMs,
+        response: recap.response,
+        kind: "session-recap"
+      });
+    } catch (error) {
+      this.activeSession.sessionRecap = {
+        ...createEmptySessionRecap(),
+        status: "failed",
+        generatedAt: nowIso(),
+        jsonPath: recapJsonPath,
+        markdownPath: recapMarkdownPath,
+        error: error instanceof Error ? error.message : String(error)
+      };
+    }
+  }
+
+  private buildFallbackSessionRecap(): SessionRecap["overview"] extends string[] ? {
+    schemaVersion: "codexSessionRecap.v1";
+    overview: string[];
+    preparedTopicsCovered: string[];
+    otherThemesDiscussed: string[];
+    poignantMoments: string[];
+    futureFollowUps: string[];
+  } : never {
+    if (!this.activeSession) {
+      throw new Error("No active session.");
+    }
+
+    const covered = Object.values(this.activeSession.topics)
+      .filter((topic) => topic.currentState === "covered" && !topic.parentId)
+      .map((topic) => topic.text)
+      .slice(0, 8);
+    const themes = this.activeSession.revisitableThemes
+      .filter((theme) => theme.status !== "dismissed")
+      .map((theme) => theme.label)
+      .slice(0, 8);
+
+    return {
+      schemaVersion: "codexSessionRecap.v1",
+      overview: this.activeSession.sessionSummary.bullets.slice(0, 3),
+      preparedTopicsCovered: covered,
+      otherThemesDiscussed: themes,
+      poignantMoments: this.activeSession.revisitableThemes.flatMap((theme) => theme.supportingMoments.slice(0, 1)).slice(0, 5),
+      futureFollowUps: themes.slice(0, 4).map((theme) => `Revisit ${theme} with one concrete follow-up question.`)
+    };
+  }
+
   private async writeSessionArtifacts(rawResponse?: string): Promise<void> {
     if (!this.activeSession) {
       return;
     }
+
+    this.refreshRevisitableThemeStatuses(nowIso(), this.activeSession.passCount);
+    this.activeSession.sessionSummary = deriveSessionSummary(this.activeSession, nowIso());
 
     const proposedMarkdown = buildProposedMarkdown(this.activeSession);
     await this.fileStore.writeProposedMarkdown(this.activeSession, proposedMarkdown);

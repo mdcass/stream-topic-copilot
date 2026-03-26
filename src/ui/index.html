@@ -65,6 +65,7 @@
                   <div class="mb-3">
                     <label class="form-label small" for="analysis-provider">Analysis provider</label>
                     <select id="analysis-provider" class="form-select form-select-sm"></select>
+                    <div id="analysis-provider-meta" class="form-text small"></div>
                   </div>
                   <div class="mb-3">
                     <label class="form-label small" for="chunk-sensitivity">Chunk sensitivity</label>
@@ -117,6 +118,14 @@
               <div class="card">
                 <div class="card-body p-0">
                   <div id="live-markdown-pane" class="hljs small font-monospace p-3 mb-0"></div>
+                </div>
+              </div>
+
+              <div class="card">
+                <div class="card-body">
+                  <div id="session-summary-pane" class="vstack gap-2 text-body-secondary small">No active session.</div>
+                  <hr />
+                  <div id="revisitable-themes-pane" class="vstack gap-2 text-body-secondary small">No revisitable themes yet.</div>
                 </div>
               </div>
 
