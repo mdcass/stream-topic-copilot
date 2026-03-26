@@ -158,10 +158,100 @@ function createSourceMonitor(provider: string, source: SelectedCaptureSourceConf
 }
 
 function createChunkText(events: TranscriptEvent[]): string {
-  return events
-    .map((event) => `[${event.sourceName}] ${event.text.trim()}`)
+  const segments: Array<Pick<TranscriptEvent, "sourceId" | "sourceName"> & { text: string; }> = [];
+
+  for (const event of events) {
+    const text = normalizeChunkEventText(event.text);
+    if (!text) {
+      continue;
+    }
+
+    const existingIndex = event.replaceLast
+      ? findPendingSegmentIndex(segments, event.sourceId)
+      : -1;
+    if (existingIndex >= 0) {
+      segments[existingIndex] = {
+        ...segments[existingIndex],
+        text: mergeTranscriptText(segments[existingIndex].text, text)
+      };
+      continue;
+    }
+
+    segments.push({
+      sourceId: event.sourceId,
+      sourceName: event.sourceName,
+      text
+    });
+  }
+
+  return segments
+    .map((event) => `[${event.sourceName}] ${event.text}`)
     .join("\n")
     .trim();
+}
+
+function findPendingSegmentIndex(
+  segments: Array<Pick<TranscriptEvent, "sourceId" | "sourceName"> & { text: string; }>,
+  sourceId: string
+): number {
+  for (let index = segments.length - 1; index >= 0; index -= 1) {
+    if (segments[index].sourceId === sourceId) {
+      return index;
+    }
+  }
+
+  return -1;
+}
+
+function normalizeChunkEventText(text: string): string {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  if (!normalized) {
+    return "";
+  }
+
+  if ((/^\[[^\]]+\]$/).test(normalized) || (/^\([^)]+\)$/).test(normalized)) {
+    return "";
+  }
+
+  return normalized;
+}
+
+function findOverlapLength(previous: string, next: string): number {
+  const previousLower = previous.toLowerCase();
+  const nextLower = next.toLowerCase();
+  const limit = Math.min(previousLower.length, nextLower.length);
+
+  for (let length = limit; length >= 1; length -= 1) {
+    if (previousLower.slice(-length) === nextLower.slice(0, length)) {
+      return length;
+    }
+  }
+
+  return 0;
+}
+
+function mergeTranscriptText(previous: string, next: string): string {
+  if (!previous) {
+    return next;
+  }
+  if (!next) {
+    return previous;
+  }
+
+  if (previous === next || previous.endsWith(next)) {
+    return previous;
+  }
+  if (next.startsWith(previous) || next.includes(previous)) {
+    return next;
+  }
+
+  const overlap = findOverlapLength(previous, next);
+  const minimumUsefulOverlap = Math.max(8, Math.floor(Math.min(previous.length, next.length) * 0.5));
+  if (overlap >= minimumUsefulOverlap) {
+    return `${previous}${next.slice(overlap)}`.trim();
+  }
+
+  return `${previous} ${next}`.replace(/\s+/g, " ").trim();
 }
 
 function sourceArtifactsDir(sessionDir: string, sourceId: string): string {
@@ -1032,7 +1122,6 @@ export class AppService {
 
     const lastPending = this.activeSession.pendingTranscriptEvents[this.activeSession.pendingTranscriptEvents.length - 1];
     if (event.replaceLast && lastPending && lastPending.sourceId === event.sourceId && !lastPending.chunkId) {
-      this.activeSession.pendingTranscriptEvents[this.activeSession.pendingTranscriptEvents.length - 1] = event;
       let tailIndex = -1;
       for (let index = this.activeSession.latestTranscriptTail.length - 1; index >= 0; index -= 1) {
         const entry = this.activeSession.latestTranscriptTail[index];
@@ -1048,8 +1137,9 @@ export class AppService {
       }
     } else {
       this.activeSession.latestTranscriptTail.push(event);
-      this.activeSession.pendingTranscriptEvents.push(event);
     }
+
+    this.activeSession.pendingTranscriptEvents.push(event);
 
     this.activeSession.latestTranscriptTail = this.activeSession.latestTranscriptTail.slice(-this.config.transcriptTailSize);
     await this.fileStore.appendJsonl(this.activeSession.id, "transcript.events.jsonl", event);
@@ -1074,6 +1164,12 @@ export class AppService {
     const startedAt = Date.parse(this.activeSession.pendingTranscriptEvents[0].timestamp);
     const endedAt = Date.parse(this.activeSession.pendingTranscriptEvents[this.activeSession.pendingTranscriptEvents.length - 1].timestamp);
     const text = createChunkText(this.activeSession.pendingTranscriptEvents);
+    if (!text) {
+      if (force) {
+        this.activeSession.pendingTranscriptEvents.splice(0);
+      }
+      return null;
+    }
     const words = wordCount(text);
     const durationSeconds = Math.max(0, Math.round((endedAt - startedAt) / 1000));
     const sentenceComplete = /[.!?]["']?$/.test(text);

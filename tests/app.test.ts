@@ -98,6 +98,42 @@ class FakeWhisperProvider implements SttProvider {
   }
 }
 
+class StreamingWhisperProvider implements SttProvider {
+  readonly name = "whisper";
+  private handlers: SttProviderHandlers | null = null;
+
+  async listSources() {
+    return [{
+      id: "stream-mic",
+      name: "Stream Mic",
+      kind: "microphone" as const,
+      groupLabel: "Microphones",
+      transport: "input-device" as const,
+      isDefault: true,
+      inputDeviceId: "stream-mic"
+    }];
+  }
+
+  async start(_options: Parameters<SttProvider["start"]>[0], handlers: SttProviderHandlers): Promise<SttProviderSession> {
+    this.handlers = handlers;
+    return {
+      stop: async () => undefined
+    };
+  }
+
+  async emit(event: Parameters<SttProviderHandlers["onTranscript"]>[0]): Promise<void> {
+    if (!this.handlers) {
+      throw new Error("StreamingWhisperProvider has not been started.");
+    }
+
+    await this.handlers.onTranscript(event);
+  }
+
+  async transcribeFile(_audioPath: string): Promise<string> {
+    return "";
+  }
+}
+
 async function writeFakeNativeHelper(runtimeConfig: RuntimeConfig, script: string): Promise<void> {
   await fs.mkdir(path.dirname(runtimeConfig.nativeSystemAudioHelper), { recursive: true });
   await fs.writeFile(runtimeConfig.nativeSystemAudioHelper, script, { mode: 0o755 });
@@ -173,6 +209,40 @@ describe("app session flow", () => {
     expect(response.text).toContain("npm run build");
   });
 
+  it("redirects root requests to the Vite dev server during npm run dev", async () => {
+    const runtimeConfig = await createRuntimeConfig();
+    const service = new AppService(
+      runtimeConfig,
+      new Map([["mock", new MockSttProvider()]]),
+      new Map([["mock", new MockAnalysisProvider()]])
+    );
+    await service.initialize();
+
+    const publicDir = path.join(runtimeConfig.rootDir, "dist/ui");
+    await fs.mkdir(publicDir, { recursive: true });
+    await fs.writeFile(path.join(publicDir, "index.html"), "<!doctype html><title>stale</title>");
+
+    const previousLifecycleEvent = process.env.npm_lifecycle_event;
+    process.env.npm_lifecycle_event = "dev:server";
+
+    try {
+      const app = createApp(service, publicDir, runtimeConfig.sessionsDir, runtimeConfig.rootDir);
+      const response = await request(app)
+        .get("/")
+        .set("Accept", "text/html")
+        .redirects(0)
+        .expect(302);
+
+      expect(response.headers.location).toBe("http://127.0.0.1:5173/");
+    } finally {
+      if (previousLifecycleEvent === undefined) {
+        delete process.env.npm_lifecycle_event;
+      } else {
+        process.env.npm_lifecycle_event = previousLifecycleEvent;
+      }
+    }
+  });
+
   it("preserves native selections and reports permission errors when system audio discovery is denied", async () => {
     const runtimeConfig = await createRuntimeConfig();
     runtimeConfig.sttProvider = "whisper";
@@ -226,6 +296,88 @@ esac
     const sessionResponse = await request(app).post("/api/session/start").expect(200);
     expect(sessionResponse.body.session.sourceMonitors["app-bundle:com.apple.QuickTimePlayerX"].error).toContain("permission is denied");
     expect(whisperProvider.startCalls).toBe(0);
+  });
+
+  it("accumulates replaceLast transcript revisions into one analysis chunk", async () => {
+    const runtimeConfig = await createRuntimeConfig();
+    runtimeConfig.sttProvider = "whisper";
+    runtimeConfig.chunkWordThreshold = 20;
+    const whisperProvider = new StreamingWhisperProvider();
+
+    const service = new AppService(
+      runtimeConfig,
+      new Map([["whisper", whisperProvider]]),
+      new Map([["mock", new MockAnalysisProvider()]])
+    );
+    await service.initialize();
+    const app = createApp(service, runtimeConfig.publicDir, runtimeConfig.sessionsDir, process.cwd());
+
+    await request(app)
+      .post("/api/config")
+      .send({
+        sttProvider: "whisper",
+        captureSources: [{
+          id: "stream-mic",
+          kind: "microphone",
+          name: "Stream Mic"
+        }]
+      })
+      .expect(200);
+
+    const startResponse = await request(app).post("/api/session/start").expect(200);
+    const sessionId = startResponse.body.session.id;
+
+    await whisperProvider.emit({
+      id: "evt_1",
+      timestamp: "2026-03-16T10:00:00.000Z",
+      text: "Welcome along everyone, my name is Mike.",
+      sourceId: "stream-mic",
+      sourceName: "Stream Mic",
+      sourceKind: "microphone",
+      replaceLast: true
+    });
+    await whisperProvider.emit({
+      id: "evt_2",
+      timestamp: "2026-03-16T10:00:06.000Z",
+      text: "And this is Red Dead Redemption 2.",
+      sourceId: "stream-mic",
+      sourceName: "Stream Mic",
+      sourceKind: "microphone",
+      replaceLast: true
+    });
+    await whisperProvider.emit({
+      id: "evt_3",
+      timestamp: "2026-03-16T10:00:12.000Z",
+      text: "And this is Red Dead Redemption 2. And we are about to get a haircut.",
+      sourceId: "stream-mic",
+      sourceName: "Stream Mic",
+      sourceKind: "microphone",
+      replaceLast: true
+    });
+    await whisperProvider.emit({
+      id: "evt_4",
+      timestamp: "2026-03-16T10:00:18.000Z",
+      text: "The first thing that I want to attempt is Sharpshooter 9, which I failed at miserably a couple of episodes ago.",
+      sourceId: "stream-mic",
+      sourceName: "Stream Mic",
+      sourceKind: "microphone",
+      replaceLast: true
+    });
+
+    const sessionDir = path.join(runtimeConfig.sessionsDir, sessionId);
+    const chunkLog = await fs.readFile(path.join(sessionDir, "transcript.chunks.jsonl"), "utf8");
+    const requestLog = await fs.readFile(path.join(sessionDir, "analysis.requests.jsonl"), "utf8");
+
+    expect(chunkLog).toContain("Welcome along everyone, my name is Mike.");
+    expect(chunkLog).toContain("And we are about to get a haircut.");
+    expect(chunkLog).toContain("Sharpshooter 9");
+    expect(requestLog).toContain("Welcome along everyone, my name is Mike.");
+    expect(requestLog).toContain("Sharpshooter 9");
+
+    await request(app)
+      .post("/api/session/end")
+      .send({ status: "finished" })
+      .expect(200);
   });
 
   it("ends a session even if the native capture helper ignores SIGTERM", async () => {

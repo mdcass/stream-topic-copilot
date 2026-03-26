@@ -107,4 +107,49 @@ describe("analysis prompt builder", () => {
     expect(prompt).toContain("Discord");
     expect(prompt).toContain("[Streamer Mic] I finally started the new PC build.");
   });
+
+  it("includes recent chunk context separately from the current chunk", () => {
+    const session = createSession();
+    session.chunks.push({
+      id: "chunk_000",
+      startedAt: "2026-03-14T09:00:00.000Z",
+      endedAt: "2026-03-14T09:00:01.000Z",
+      text: "[Streamer Mic] Quick recap of the last stream.",
+      wordCount: 8,
+      eventIds: ["evt_0"]
+    });
+    const chunk: TranscriptChunk = {
+      id: "chunk_001",
+      startedAt: "2026-03-14T09:00:02.000Z",
+      endedAt: "2026-03-14T09:00:10.000Z",
+      text: "[Streamer Mic] I finally started the new PC build.",
+      wordCount: 10,
+      eventIds: ["evt_1"]
+    };
+    session.chunks.push(chunk);
+    const config: AppConfig = {
+      markdownFilePath: "/tmp/topics.md",
+      captureSources: session.captureSources,
+      sttProvider: "mock",
+      analysisProvider: "mock",
+      chunkSensitivity: "medium",
+      visibleSuggestionCounts: {
+        activeTopics: 3,
+        elaborationStarters: 3,
+        adjacentNextTopics: 3,
+        recoveryPrompts: 3,
+        offTopicObservations: 3
+      },
+      sessionResumePreference: "manual",
+      analysisAutoApplyThreshold: 0.8,
+      pollingIntervalMs: 2000,
+      transcriptTailSize: 30
+    };
+
+    const prompt = buildAnalysisPrompt(session, chunk, config);
+
+    expect(prompt).toContain("Recent transcript context");
+    expect(prompt).toContain("Quick recap of the last stream.");
+    expect(prompt).toContain("\"chunkId\": \"chunk_000\"");
+  });
 });

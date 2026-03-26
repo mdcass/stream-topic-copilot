@@ -40,6 +40,15 @@ export function buildAnalysisPrompt(session: SessionSnapshot, chunk: TranscriptC
       name: source.name
     }))
   };
+  const recentChunks = session.chunks
+    .filter((entry) => entry.id !== chunk.id)
+    .slice(-3)
+    .map((entry) => ({
+      chunkId: entry.id,
+      startedAt: entry.startedAt,
+      endedAt: entry.endedAt,
+      text: entry.text
+    }));
 
   return [
     "You are analyzing a transcript chunk for a local stream topic copilot.",
@@ -49,6 +58,9 @@ export function buildAnalysisPrompt(session: SessionSnapshot, chunk: TranscriptC
     "",
     "Compact session context:",
     JSON.stringify(context, null, 2),
+    "",
+    "Recent transcript context (background only; cite evidence from the current chunk):",
+    JSON.stringify(recentChunks, null, 2),
     "",
     "Relevant unresolved topics:",
     JSON.stringify(unresolvedTopics, null, 2),

@@ -13,28 +13,28 @@ const topicDecisionSchema = z.object({
   confidence: z.number().min(0).max(1),
   rationale: z.string().min(1),
   evidence: z.array(evidenceSchema).min(1)
-}).passthrough();
+}).strict();
 
 const suggestionSchema = z.object({
   text: z.string().min(1),
   confidence: z.number().min(0).max(1),
   rationale: z.string().min(1),
   evidence: z.array(evidenceSchema).min(1),
-  topicId: z.string().min(1).optional()
-}).passthrough();
+  topicId: z.string().min(1).nullable()
+}).strict();
 
 const offTopicObservationSchema = z.object({
   label: z.string().min(1),
   confidence: z.number().min(0).max(1),
   rationale: z.string().min(1),
   evidence: z.array(evidenceSchema).min(1)
-}).passthrough();
+}).strict();
 
 const warningSchema = z.object({
   code: z.string().min(1),
   message: z.string().min(1),
-  topicId: z.string().min(1).optional()
-}).passthrough();
+  topicId: z.string().min(1).nullable()
+}).strict();
 
 export const codexAnalysisResponseSchema = z.object({
   schemaVersion: z.literal("codexAnalysis.v1"),

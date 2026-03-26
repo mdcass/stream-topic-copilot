@@ -32,7 +32,7 @@ function buildMockResponse(input: AnalysisRunInput): CodexAnalysisResponse {
         confidence: 0.74,
         rationale: "The chunk already has momentum; a follow-up prompt helps sustain it.",
         evidence: [{ chunkId: input.chunk.id, excerpt }],
-        topicId: leadTopic?.id
+        topicId: leadTopic?.id ?? null
       }],
       adjacentNextTopics: unresolvedTopics[1] ? [{
         text: `Segue to ${unresolvedTopics[1].text} when the current thought winds down.`,
@@ -45,7 +45,8 @@ function buildMockResponse(input: AnalysisRunInput): CodexAnalysisResponse {
         text: "If energy drops, recap one thing you learned from the last topic.",
         confidence: 0.66,
         rationale: "Recovery prompts should help the streamer re-enter the topic plan.",
-        evidence: [{ chunkId: input.chunk.id, excerpt }]
+        evidence: [{ chunkId: input.chunk.id, excerpt }],
+        topicId: null
       }]
     },
     offTopicObservations: excerpt ? [{

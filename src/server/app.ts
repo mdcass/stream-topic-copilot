@@ -4,12 +4,29 @@ import path from "node:path";
 
 import type { AppService } from "./appService.js";
 
+function isViteDevelopmentServerExpected(): boolean {
+  return process.env.npm_lifecycle_event === "dev" || process.env.npm_lifecycle_event === "dev:server";
+}
+
 export function createApp(service: AppService, publicDir: string, sessionsDir: string, rootDir: string) {
   const app = express();
   const indexPath = path.join(publicDir, "index.html");
 
   app.use(express.json());
   app.use("/artifacts", express.static(sessionsDir));
+  app.use((request, response, next) => {
+    if (
+      isViteDevelopmentServerExpected() &&
+      request.method === "GET" &&
+      !request.path.startsWith("/api") &&
+      request.accepts("html")
+    ) {
+      response.redirect(`http://127.0.0.1:5173${request.originalUrl}`);
+      return;
+    }
+
+    next();
+  });
   app.use(express.static(publicDir));
 
   app.get("/api/state", async (_request, response) => {
@@ -100,7 +117,7 @@ export function createApp(service: AppService, publicDir: string, sessionsDir: s
     }
   });
 
-  app.get("*", (_request, response) => {
+  app.get("*", (request, response) => {
     if (fs.existsSync(indexPath)) {
       response.sendFile(indexPath);
       return;

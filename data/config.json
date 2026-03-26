@@ -1,14 +1,14 @@
 {
-  "markdownFilePath": "/Users/mike/Projects/stream-topic-copilot/data/sample-topics.md",
+  "markdownFilePath": "/Users/mike/Projects/stream-topic-copilot/data/2026-03-20.md",
   "captureSources": [
     {
-      "id": "3",
-      "kind": "system-mix",
-      "name": "BlackHole 2ch"
+      "id": "2",
+      "kind": "microphone",
+      "name": "BOYALINK"
     }
   ],
   "sttProvider": "whisper",
-  "analysisProvider": "mock",
+  "analysisProvider": "codex",
   "chunkSensitivity": "medium",
   "visibleSuggestionCounts": {
     "activeTopics": 3,
